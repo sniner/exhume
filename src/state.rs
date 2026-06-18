@@ -1,0 +1,188 @@
+//! The TOML state file.
+//!
+//! It is intended to be read, understood, and even hand-edited by a human, and
+//! is sufficient to repeat a run without re-specifying parameters. Layout:
+//!
+//! ```toml
+//! [meta]            # format version + provenance
+//! [params]          # the full run configuration (see RunParams)
+//! [progress]        # human-facing totals (derivable from regions)
+//! [[regions]]       # the region map: start / length / status
+//! ```
+
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::error::{Error, Result};
+use crate::params::RunParams;
+use crate::region::{Region, RegionMap, RegionStatus};
+
+/// Provenance and format version of a state file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Meta {
+    pub version: u32,
+    pub program: String,
+    pub program_version: String,
+    pub created: DateTime<Utc>,
+    pub updated: DateTime<Utc>,
+}
+
+/// Human-facing progress totals. These are derivable from the region map but
+/// are written out so the file is informative at a glance.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Progress {
+    /// Size of the copy domain in bytes, or `0` if unknown.
+    #[serde(default)]
+    pub bytes_total: u64,
+    #[serde(default)]
+    pub bytes_done: u64,
+    /// Bytes actually written to the target (< `bytes_done` in skip-unchanged
+    /// mode, where unchanged blocks are not rewritten).
+    #[serde(default)]
+    pub bytes_written: u64,
+    /// Number of bad regions recorded.
+    #[serde(default)]
+    pub errors: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateFile {
+    pub meta: Meta,
+    pub params: RunParams,
+    #[serde(default)]
+    pub progress: Progress,
+    #[serde(default)]
+    pub regions: Vec<Region>,
+}
+
+impl StateFile {
+    /// Current state-file format version.
+    pub const VERSION: u32 = 1;
+
+    /// Build a state file from the live copy state.
+    #[must_use]
+    pub fn build(
+        params: &RunParams,
+        map: &RegionMap,
+        domain: u64,
+        created: DateTime<Utc>,
+        bytes_written: u64,
+    ) -> Self {
+        StateFile {
+            meta: Meta {
+                version: Self::VERSION,
+                program: env!("CARGO_PKG_NAME").to_string(),
+                program_version: env!("CARGO_PKG_VERSION").to_string(),
+                created,
+                updated: Utc::now(),
+            },
+            params: params.clone(),
+            progress: Progress {
+                bytes_total: domain,
+                bytes_done: map.bytes_with(RegionStatus::Done),
+                bytes_written,
+                errors: map
+                    .regions()
+                    .iter()
+                    .filter(|r| r.status == RegionStatus::Bad)
+                    .count() as u64,
+            },
+            regions: map.regions().to_vec(),
+        }
+    }
+
+    /// The region map described by this state file.
+    #[must_use]
+    pub fn region_map(&self) -> RegionMap {
+        RegionMap::from_regions(self.regions.clone())
+    }
+
+    /// Load and parse a state file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or is not valid exhume state.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::io(format!("reading state file '{}'", path.display()), e))?;
+        toml::from_str(&text).map_err(|source| Error::StateParse {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Load the state file if it exists, otherwise `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read or parsed.
+    pub fn load_if_exists(path: &Path) -> Result<Option<Self>> {
+        if path.exists() {
+            Ok(Some(Self::load(path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Write the state file atomically: serialise to a sibling `*.tmp` file and
+    /// rename over the target, so a crash mid-write never corrupts the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialisation, the temp write, or the rename fails.
+    pub fn save_atomic(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self)?;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, text.as_bytes())
+            .map_err(|e| Error::io(format!("writing state file '{}'", tmp.display()), e))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| Error::io(format!("renaming state file to '{}'", path.display()), e))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StateFile;
+    use crate::params::RunParams;
+    use crate::region::{RegionMap, RegionStatus};
+    use chrono::Utc;
+    use std::path::PathBuf;
+
+    fn sample_params() -> RunParams {
+        RunParams {
+            source: PathBuf::from("/dev/sdb"),
+            target: PathBuf::from("grave.img"),
+            block_size: 1 << 20,
+            skip: 0,
+            seek: 0,
+            count: 0,
+            skip_unchanged: false,
+            skip_zeros: false,
+        }
+    }
+
+    #[test]
+    fn round_trips_through_toml() {
+        let mut map = RegionMap::from_total(4096);
+        map.mark(0, 2048, RegionStatus::Done);
+        map.mark(2048, 1024, RegionStatus::Bad);
+        let state = StateFile::build(&sample_params(), &map, 4096, Utc::now(), 2048);
+
+        let text = toml::to_string_pretty(&state).unwrap();
+        assert!(text.contains("[meta]"));
+        assert!(text.contains("[params]"));
+        assert!(text.contains("[[regions]]"));
+
+        let parsed: StateFile = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.params, sample_params());
+        assert_eq!(parsed.progress.bytes_done, 2048);
+        assert_eq!(parsed.progress.bytes_written, 2048);
+        assert_eq!(parsed.progress.errors, 1);
+        assert_eq!(parsed.region_map(), map);
+    }
+}

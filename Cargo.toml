@@ -1,0 +1,29 @@
+[package]
+name = "exhume"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Stefan Schönberger <stefan@sniner.dev>"]
+license = "GPL-3.0-or-later"
+description = "Modern, resumable disk imaging and rescue tool — a friendlier dd / dd_rescue"
+repository = "https://github.com/sniner/exhume"
+homepage = "https://github.com/sniner/exhume"
+keywords = ["dd", "ddrescue", "imaging", "recovery", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+readme = "README.md"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+nix = { version = "0.29", features = ["signal"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
