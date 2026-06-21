@@ -76,6 +76,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub quiet: bool,
 
+    /// Print the final summary as a single JSON object on stdout instead of
+    /// human-readable text (the progress bar still draws to stderr)
+    #[arg(long)]
+    pub json: bool,
+
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,

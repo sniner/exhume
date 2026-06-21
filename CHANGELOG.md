@@ -37,3 +37,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 - Size arguments (`--block-size`, `--count`, `--skip`, `--seek`) accept
   human-readable suffixes (`64K`, `1M`, `1.5G`, `4KiB`, `1MB`)
 - Progress bar with throughput and ETA (suppressible with `--quiet`)
+- **`--json`** — prints the final run summary as a single JSON object on stdout
+  (status, paths, and byte/bad-region totals) for scripting; the progress bar
+  still draws to stderr

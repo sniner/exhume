@@ -295,3 +295,33 @@ fn defaults_target_to_grave_img() {
     assert!(Path::new(&dir.path().join("grave.img")).exists());
     assert!(Path::new(&dir.path().join("grave.img.state")).exists());
 }
+
+#[test]
+fn json_flag_emits_a_machine_readable_summary() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let data = pattern(128 * 1024);
+    fs::write(&src, &data).unwrap();
+
+    let output = exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg("--json")
+        .arg("--quiet")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("stdout is valid JSON");
+    assert_eq!(report["status"], "completed");
+    assert_eq!(report["bytes_total"], data.len() as u64);
+    assert_eq!(report["bytes_done"], data.len() as u64);
+    assert_eq!(report["bytes_written"], data.len() as u64);
+    assert_eq!(report["bad_regions"], 0);
+    assert_eq!(report["completed"], true);
+    assert_eq!(report["interrupted"], false);
+    assert_eq!(report["target"], dst.to_str().unwrap());
+}

@@ -1,6 +1,7 @@
 //! exhume binary entry point: parse arguments, set up logging, run the copy,
 //! and render the outcome.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -14,7 +15,11 @@ fn main() -> ExitCode {
 
     match exhume::run(&cli) {
         Ok(summary) => {
-            print_summary(&summary);
+            if cli.json {
+                print_json(&summary);
+            } else {
+                print_summary(&summary);
+            }
             exit_code(&summary)
         }
         Err(err) => {
@@ -88,6 +93,62 @@ fn skip_reason(s: &Summary) -> &'static str {
         (true, false) => "rest already matched",
         (false, true) => "zero blocks left sparse",
         (false, false) => "",
+    }
+}
+
+/// Machine-readable view of a [`Summary`], serialised to stdout under `--json`.
+/// Kept separate from the engine's `Summary` so the wire format stays stable
+/// independent of the internal struct.
+#[derive(serde::Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "wire-format DTO mirroring Summary's independent outcome flags"
+)]
+struct JsonReport<'a> {
+    /// `"completed"`, `"interrupted"`, or `"errors"` — mirrors the exit code.
+    status: &'a str,
+    source: &'a Path,
+    target: &'a Path,
+    state: &'a Path,
+    bytes_total: u64,
+    bytes_done: u64,
+    bytes_written: u64,
+    bad_bytes: u64,
+    bad_regions: usize,
+    skip_unchanged: bool,
+    skip_zeros: bool,
+    completed: bool,
+    interrupted: bool,
+}
+
+/// Render the run outcome as a single JSON object on stdout.
+fn print_json(s: &Summary) {
+    let status = if s.completed {
+        "completed"
+    } else if s.interrupted {
+        "interrupted"
+    } else {
+        "errors"
+    };
+    let report = JsonReport {
+        status,
+        source: &s.source,
+        target: &s.target,
+        state: &s.state_path,
+        bytes_total: s.bytes_total,
+        bytes_done: s.bytes_done,
+        bytes_written: s.bytes_written,
+        bad_bytes: s.bad_bytes,
+        bad_regions: s.bad_regions,
+        skip_unchanged: s.skip_unchanged,
+        skip_zeros: s.skip_zeros,
+        completed: s.completed,
+        interrupted: s.interrupted,
+    };
+    // Serialisation of this fixed struct cannot fail; fall back rather than panic.
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => println!("{json}"),
+        Err(err) => eprintln!("exhume: failed to render JSON summary: {err}"),
     }
 }
 

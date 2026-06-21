@@ -62,6 +62,10 @@ Options:
   block: the bad region is split into the readable (`done`) and still-bad parts.
 - `-f, --force` — overwrite an existing, non-empty target
 - `-q, --quiet` — suppress the progress bar
+- `--json` — print the final summary as a single JSON object on stdout instead
+  of human-readable text (the progress bar still draws to stderr). The object
+  carries `status` (`completed` / `interrupted` / `errors`), the source/target/
+  state paths, and the byte and bad-region totals
 - `-v, --verbose` — increase log verbosity (`-v`, `-vv`, `-vvv`)
 
 ## Safety
