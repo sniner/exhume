@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::cli::Cli;
 use crate::error::{Error, Result};
-use crate::params::{DEFAULT_SECTOR_SIZE, DEFAULT_TARGET, RunParams};
+use crate::params::{DEFAULT_SECTOR_SIZE, DEFAULT_TARGET, RunParams, require_sector_aligned};
 use crate::progress::Reporter;
 use crate::region::{RegionMap, RegionStatus};
 use crate::state::StateFile;
@@ -206,6 +206,11 @@ fn resolve_params(
             );
         }
     }
+
+    // Offsets must sit on the sector grid (the map stays aligned; O_DIRECT later
+    // depends on it). `length` is exempt — its tail rounds up.
+    require_sector_aligned("skip", params.skip, params.sector_size)?;
+    require_sector_aligned("seek", params.seek, params.sector_size)?;
 
     Ok(params)
 }

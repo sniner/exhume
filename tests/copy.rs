@@ -134,6 +134,31 @@ fn honours_skip_seek_and_length() {
 }
 
 #[test]
+fn rejects_a_misaligned_offset_with_a_helpful_hint() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    fs::write(&src, pattern(4096)).unwrap();
+
+    // A regular file detects the 512-byte fallback sector; --skip 100 is not a
+    // multiple of it, so the run is refused with a suggestion of both neighbours.
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg("--skip")
+        .arg("100")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "not a multiple of the 512-byte sector size",
+        ))
+        .stderr(predicate::str::contains("512 (up)"));
+
+    // Nothing was written.
+    assert!(!dst.exists());
+}
+
+#[test]
 fn skip_unchanged_writes_only_changed_blocks() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

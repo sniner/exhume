@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
+use crate::error::{Error, Result};
 
 /// Default target when none is given on the command line.
 pub const DEFAULT_TARGET: &str = "grave.img";
@@ -85,5 +86,93 @@ impl RunParams {
             skip_unchanged: cli.skip_unchanged || prior.is_some_and(|p| p.skip_unchanged),
             skip_zeros: cli.skip_zeros || prior.is_some_and(|p| p.skip_zeros),
         }
+    }
+}
+
+/// Require that a byte offset `value` (the `--{label}` flag) is a whole number
+/// of `sector`-sized blocks. Offsets must sit on the sector grid so the region
+/// map stays aligned and `O_DIRECT` can be added later; `--length` is exempt (its
+/// tail simply rounds up). On a violation the error suggests the nearest aligned
+/// values as bare integers, with a human form appended only when it is exact.
+///
+/// # Errors
+///
+/// Returns [`Error::Misaligned`] if `value` is not a multiple of `sector`.
+pub fn require_sector_aligned(label: &str, value: u64, sector: u64) -> Result<()> {
+    if sector == 0 || value % sector == 0 {
+        return Ok(());
+    }
+    let down = value - value % sector;
+    let up = down + sector;
+    Err(Error::Misaligned(format!(
+        "--{label} {value} is not a multiple of the {sector}-byte sector size; try {} or {}",
+        aligned_label(down, "down"),
+        aligned_label(up, "up"),
+    )))
+}
+
+/// Render an aligned suggestion like `102400 (up, 100K)` — the bare byte value,
+/// the direction, and a human-readable form only when it divides exactly.
+fn aligned_label(value: u64, dir: &str) -> String {
+    match human_if_exact(value) {
+        Some(h) => format!("{value} ({dir}, {h})"),
+        None => format!("{value} ({dir})"),
+    }
+}
+
+/// A short binary human-readable rendering (`1K`, `4M`, `2G`) of `n` — only when
+/// it divides cleanly into a small multiple of a unit. The quotient bound keeps
+/// the hint tidy: every sector-aligned value is a multiple of 1024, so without
+/// it a value like 12345344 would render as the unhelpful `12056K`.
+fn human_if_exact(n: u64) -> Option<String> {
+    if n == 0 {
+        return None;
+    }
+    for (unit, suffix) in [(1u64 << 30, 'G'), (1 << 20, 'M'), (1 << 10, 'K')] {
+        if n % unit == 0 {
+            let quotient = n / unit;
+            return (quotient < 1000).then(|| format!("{quotient}{suffix}"));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{human_if_exact, require_sector_aligned};
+
+    #[test]
+    fn aligned_offsets_pass() {
+        assert!(require_sector_aligned("skip", 0, 512).is_ok());
+        assert!(require_sector_aligned("skip", 4096, 512).is_ok());
+        assert!(require_sector_aligned("seek", 8192, 4096).is_ok());
+    }
+
+    #[test]
+    fn misaligned_offset_suggests_both_neighbours() {
+        let err = require_sector_aligned("skip", 12_345_678, 4096).unwrap_err();
+        let msg = err.to_string();
+        // 12345678 = 3014 * 4096 + 334 → down 12345344, up 12349440.
+        assert!(msg.contains("--skip 12345678"), "{msg}");
+        assert!(msg.contains("12345344 (down)"), "{msg}");
+        assert!(msg.contains("12349440 (up)"), "{msg}");
+    }
+
+    #[test]
+    fn exact_suggestion_gets_a_human_form() {
+        // 100001 with a 512 sector → down 99840, up 100352 (neither a clean
+        // unit), but pick a case that lands exactly: 100K-aligned grid.
+        let err = require_sector_aligned("seek", 102_400 + 1, 1024).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("102400 (down, 100K)"), "{msg}");
+    }
+
+    #[test]
+    fn human_if_exact_picks_the_largest_unit() {
+        assert_eq!(human_if_exact(1 << 30).as_deref(), Some("1G"));
+        assert_eq!(human_if_exact(2 << 20).as_deref(), Some("2M"));
+        assert_eq!(human_if_exact(100 << 10).as_deref(), Some("100K"));
+        assert_eq!(human_if_exact(0), None);
+        assert_eq!(human_if_exact(1000), None);
     }
 }

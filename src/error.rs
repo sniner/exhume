@@ -17,9 +17,16 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// A size argument (block size, count, offset) could not be parsed.
+    /// A size argument (sector size, transfer size, length) could not be parsed
+    /// or was out of range.
     #[error("invalid size: {0}")]
     InvalidSize(String),
+
+    /// A byte offset (`--skip` / `--seek`) is not a multiple of the sector size.
+    /// The carried message names the offset and suggests the nearest aligned
+    /// values.
+    #[error("{0}")]
+    Misaligned(String),
 
     /// The target already exists and neither `--force` nor a resume applies.
     #[error(
