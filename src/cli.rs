@@ -69,6 +69,15 @@ pub struct Cli {
     #[arg(long)]
     pub retry: bool,
 
+    /// Read the source with O_DIRECT, bypassing the page cache so a re-read
+    /// actually hits the medium (Linux only; for failing devices)
+    #[allow(
+        clippy::doc_markdown,
+        reason = "this doc comment is clap --help text; backticks would render literally"
+    )]
+    #[arg(long)]
+    pub direct: bool,
+
     /// Overwrite an existing, non-empty target
     #[arg(short, long)]
     pub force: bool,

@@ -138,8 +138,26 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     let reporter = Reporter::new(domain, processed_start, cli.quiet);
     let prior_written = existing.as_ref().map_or(0, |s| s.progress.bytes_written);
 
+    // O_DIRECT (reads only): a separate fd opened with O_DIRECT, used for the
+    // copy so re-reads bypass the page cache and hit the medium. Only for a
+    // seekable source, and only on Linux.
+    let direct = cli.direct && domain > 0 && cfg!(target_os = "linux");
+    if cli.direct && domain == 0 {
+        warn!("--direct ignored: the source is not seekable");
+    } else if cli.direct && !cfg!(target_os = "linux") {
+        warn!("--direct ignored: O_DIRECT is only available on Linux");
+    }
+    let direct_src = if direct {
+        let f = open_source_direct(&cli.source)?;
+        verify_direct(&f, params.sector_size, params.skip)?;
+        Some(f)
+    } else {
+        None
+    };
+    let read_src = direct_src.as_ref().unwrap_or(&src);
+
     let mut copier = Copier::new(
-        &src,
+        read_src,
         &dst,
         &params,
         &reporter,
@@ -149,7 +167,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         map,
         prior_written,
         transfer,
-        false,
+        direct,
     );
     let interrupted = copier.drive(cli.retry)?;
 
@@ -674,6 +692,43 @@ fn detect_sector_size(file: &File) -> u64 {
             .filter(|&s| s > 0)
             .unwrap_or(DEFAULT_SECTOR_SIZE),
         Err(_) => DEFAULT_SECTOR_SIZE,
+    }
+}
+
+/// Open the source with `O_DIRECT` so copy reads bypass the page cache (Linux).
+#[cfg(target_os = "linux")]
+fn open_source_direct(path: &Path) -> Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECT)
+        .open(path)
+        .map_err(|e| {
+            Error::io(
+                format!("opening source '{}' with O_DIRECT", path.display()),
+                e,
+            )
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_source_direct(_path: &Path) -> Result<File> {
+    unreachable!("open_source_direct is only reached when O_DIRECT is available (Linux)")
+}
+
+/// Probe that `O_DIRECT` actually works on this source with one aligned sector
+/// read. A genuine I/O error (or EOF) is fine — it means the medium is just
+/// unreadable there; only `EINVAL` means the source/filesystem rejects `O_DIRECT`,
+/// which we turn into a clear "retry without --direct" message.
+fn verify_direct(file: &File, sector: u64, offset: u64) -> Result<()> {
+    let len = usize::try_from(sector).expect("sector size fits in usize");
+    let mut probe = AlignedBuf::new(len, len);
+    match file.read_at(&mut probe[..], offset) {
+        Err(e) if e.raw_os_error() == Some(nix::libc::EINVAL) => Err(Error::io(
+            "--direct is not supported for this source or filesystem; retry without it",
+            e,
+        )),
+        _ => Ok(()),
     }
 }
 
