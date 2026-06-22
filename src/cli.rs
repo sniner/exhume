@@ -32,13 +32,19 @@ pub struct Cli {
     /// State file (TOML) [default: <target>.state]
     pub state: Option<PathBuf>,
 
-    /// Block size, e.g. 512, 64K, 1M
+    /// Logical sector size — the alignment and recovery granularity.
+    /// Auto-detected from block devices; override only if you must (e.g. 512, 4K)
+    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+    pub sector_size: Option<u64>,
+
+    /// I/O transfer size for healthy reads (default 1M). Aligned down to a
+    /// multiple of the sector size. Smaller values reduce skip-* granularity
     #[arg(short, long, value_name = "SIZE", value_parser = parse_size)]
-    pub block_size: Option<u64>,
+    pub transfer_size: Option<u64>,
 
     /// Copy at most this many bytes (0 = whole source)
     #[arg(short, long, value_name = "SIZE", value_parser = parse_size)]
-    pub count: Option<u64>,
+    pub length: Option<u64>,
 
     /// Skip this many bytes at the start of the source
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
@@ -59,14 +65,9 @@ pub struct Cli {
     pub skip_zeros: bool,
 
     /// Re-read regions marked bad in a previous run and recover what is now
-    /// readable (one pass; re-run for more). Best paired with --retry-block-size
+    /// readable (one pass; re-run for more). Reads at sector granularity
     #[arg(long)]
     pub retry: bool,
-
-    /// Block size for --retry reads (default: --block-size). Smaller values
-    /// salvage more of a partially-readable bad block
-    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
-    pub retry_block_size: Option<u64>,
 
     /// Overwrite an existing, non-empty target
     #[arg(short, long)]

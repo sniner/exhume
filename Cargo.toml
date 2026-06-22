@@ -16,7 +16,7 @@ readme = "README.md"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.29", features = ["signal", "ioctl"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"

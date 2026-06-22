@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::cli::Cli;
 use crate::error::{Error, Result};
-use crate::params::{DEFAULT_TARGET, RunParams};
+use crate::params::{DEFAULT_SECTOR_SIZE, DEFAULT_TARGET, RunParams};
 use crate::progress::Reporter;
 use crate::region::{RegionMap, RegionStatus};
 use crate::state::StateFile;
@@ -71,13 +71,18 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     let existing = StateFile::load_if_exists(&state_path)?;
     let resuming = existing.is_some();
-    let params = RunParams::resolve(cli, target.clone(), existing.as_ref().map(|s| &s.params));
 
-    if params.block_size == 0 {
-        return Err(Error::InvalidSize(
-            "block size must be greater than 0".to_string(),
-        ));
-    }
+    // Open the source early: the sector size is probed from it and feeds
+    // parameter resolution.
+    let mut src = File::open(&cli.source)
+        .map_err(|e| Error::io(format!("opening source '{}'", cli.source.display()), e))?;
+    let detected_sector = detect_sector_size(&src);
+
+    let params = resolve_params(cli, target.clone(), existing.as_ref(), detected_sector)?;
+
+    // Effective transfer size: the desired size aligned down to whole sectors,
+    // never below one sector.
+    let transfer = align_down(params.transfer_size, params.sector_size).max(params.sector_size);
 
     // Overwrite safety: an existing, occupied target needs --force, unless a
     // state file is present (which signals an intentional resume).
@@ -110,8 +115,6 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     install_signal_handler()?;
 
-    let mut src = File::open(&params.source)
-        .map_err(|e| Error::io(format!("opening source '{}'", params.source.display()), e))?;
     // Never truncate: the target may be a block device or a partially written image.
     let dst = OpenOptions::new()
         .read(true)
@@ -121,7 +124,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         .open(&target)
         .map_err(|e| Error::io(format!("opening target '{}'", target.display()), e))?;
 
-    let domain = domain_length(detect_size(&mut src), params.skip, params.count);
+    let domain = domain_length(detect_size(&mut src), params.skip, params.length);
 
     let map = match &existing {
         Some(state) => state.region_map(),
@@ -129,22 +132,6 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     };
 
     let created = existing.as_ref().map_or_else(Utc::now, |s| s.meta.created);
-
-    let retry_bs = match cli.retry_block_size {
-        Some(0) => {
-            return Err(Error::InvalidSize(
-                "retry block size must be greater than 0".to_string(),
-            ));
-        }
-        Some(n) => n,
-        None => params.block_size,
-    };
-    // The shared buffer must fit the largest read either pass will issue.
-    let buf_size = if domain > 0 && cli.retry {
-        params.block_size.max(retry_bs)
-    } else {
-        params.block_size
-    };
 
     let processed_start = domain.saturating_sub(map.bytes_with(RegionStatus::Untried));
     let reporter = Reporter::new(domain, processed_start, cli.quiet);
@@ -160,9 +147,9 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         domain,
         map,
         prior_written,
-        buf_size,
+        transfer,
     );
-    let interrupted = copier.drive(cli.retry, retry_bs)?;
+    let interrupted = copier.drive(cli.retry)?;
 
     // Persist the final state regardless of how the loop ended.
     copier.flush()?;
@@ -182,6 +169,45 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         bytes_written,
         interrupted,
     ))
+}
+
+/// Resolve run parameters from CLI + prior state, then validate them against a
+/// resumed state. The region map is aligned to the sector size recorded in the
+/// state file, so a resume must not silently re-grid it against a different one.
+fn resolve_params(
+    cli: &Cli,
+    target: PathBuf,
+    existing: Option<&StateFile>,
+    detected_sector: u64,
+) -> Result<RunParams> {
+    let params = RunParams::resolve(cli, target, existing.map(|s| &s.params), detected_sector);
+
+    if params.sector_size == 0 || params.transfer_size == 0 {
+        return Err(Error::InvalidSize(
+            "sector size and transfer size must be greater than 0".to_string(),
+        ));
+    }
+
+    if let Some(prev) = existing {
+        if let Some(cli_sector) = cli.sector_size {
+            if cli_sector != prev.params.sector_size {
+                return Err(Error::InvalidSize(format!(
+                    "--sector-size {} conflicts with the resumed state's sector size {} \
+                     (the region map is aligned to the latter; edit or remove the state file \
+                     to change it)",
+                    cli_sector, prev.params.sector_size
+                )));
+            }
+        } else if detected_sector != prev.params.sector_size {
+            warn!(
+                detected = detected_sector,
+                recorded = prev.params.sector_size,
+                "detected sector size differs from the state file — keeping the recorded value"
+            );
+        }
+    }
+
+    Ok(params)
 }
 
 /// Assemble the run [`Summary`] from the final copy state.
@@ -227,6 +253,9 @@ struct Copier<'a> {
     state_path: &'a Path,
     created: DateTime<Utc>,
     domain: u64,
+    /// Effective transfer size for healthy reads: the read/write chunk on the
+    /// happy path, and the buffer size. Read errors drop to sector granularity.
+    transfer: u64,
     map: RegionMap,
     /// Bytes actually written to the target (carried across resumes); excludes
     /// blocks skipped in skip-unchanged mode because they already matched.
@@ -239,7 +268,7 @@ struct Copier<'a> {
 
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "buffer indices are bounded by block_size, which fits in usize on supported targets"
+    reason = "buffer indices are bounded by the transfer size, which fits in usize on supported targets"
 )]
 impl<'a> Copier<'a> {
     #[allow(clippy::too_many_arguments)]
@@ -253,9 +282,9 @@ impl<'a> Copier<'a> {
         domain: u64,
         map: RegionMap,
         bytes_written: u64,
-        buf_size: u64,
+        transfer: u64,
     ) -> Self {
-        let buf_size = buf_size as usize;
+        let buf_size = transfer as usize;
         let cmp_buf = if params.skip_unchanged {
             vec![0u8; buf_size]
         } else {
@@ -269,6 +298,7 @@ impl<'a> Copier<'a> {
             state_path,
             created,
             domain,
+            transfer,
             map,
             bytes_written,
             buf: vec![0u8; buf_size],
@@ -278,23 +308,20 @@ impl<'a> Copier<'a> {
     }
 
     /// Drive the whole copy: for a known-size domain, process the untried
-    /// regions and then, if `retry` is set, re-read the `bad` regions with
-    /// `retry_block_size`; for an unknown-size source, copy sequentially.
-    /// Returns `true` if interrupted.
-    fn drive(&mut self, retry: bool, retry_block_size: u64) -> Result<bool> {
+    /// regions and then, if `retry` is set, re-read the `bad` regions; for an
+    /// unknown-size source, copy sequentially. Both passes use the same logic
+    /// (read the transfer size, drop to sectors on error). Returns `true` if
+    /// interrupted.
+    fn drive(&mut self, retry: bool) -> Result<bool> {
         if self.domain == 0 {
             return self.run_sequential();
         }
-        let mut stopped = self.process(RegionStatus::Untried, self.params.block_size, true)?;
+        let mut stopped = self.process(RegionStatus::Untried, true)?;
         if !stopped && retry {
             let bad_before = self.map.bytes_with(RegionStatus::Bad);
             if bad_before > 0 {
-                info!(
-                    bad_bytes = bad_before,
-                    block_size = retry_block_size,
-                    "retrying bad regions"
-                );
-                stopped = self.process(RegionStatus::Bad, retry_block_size, false)?;
+                info!(bad_bytes = bad_before, "retrying bad regions");
+                stopped = self.process(RegionStatus::Bad, false)?;
                 let bad_after = self.map.bytes_with(RegionStatus::Bad);
                 info!(
                     recovered = bad_before - bad_after,
@@ -308,12 +335,12 @@ impl<'a> Copier<'a> {
         Ok(stopped)
     }
 
-    /// Read and copy every region currently in `status`, using `block_size`-sized
+    /// Read and copy every region currently in `status`, using transfer-sized
     /// reads. Read errors mark the (sub-)region bad and are skipped; writes are
     /// fatal. `advance` controls the progress bar: the first untried pass
     /// advances it, a retry pass re-scans already-counted bytes and passes
     /// `false`. Returns `true` if interrupted.
-    fn process(&mut self, status: RegionStatus, block_size: u64, advance: bool) -> Result<bool> {
+    fn process(&mut self, status: RegionStatus, advance: bool) -> Result<bool> {
         for region in self.map.regions_with(status) {
             let mut pos = region.start;
             let end = region.end();
@@ -322,7 +349,7 @@ impl<'a> Copier<'a> {
                     self.flush()?;
                     return Ok(true);
                 }
-                let want = block_size.min(end - pos);
+                let want = self.transfer.min(end - pos);
                 let src_off = self.params.skip + pos;
                 match self.src.read_at(&mut self.buf[..want as usize], src_off) {
                     Ok(0) => {
@@ -363,20 +390,20 @@ impl<'a> Copier<'a> {
     /// without a known domain we cannot safely skip ahead. Returns `true` if
     /// interrupted.
     fn run_sequential(&mut self) -> Result<bool> {
-        let block_size = self.params.block_size;
+        let transfer = self.transfer;
         let mut pos = self.map.covered_end();
         loop {
             if interrupted() {
                 self.flush()?;
                 return Ok(true);
             }
-            if self.params.count > 0 && pos >= self.params.count {
+            if self.params.length > 0 && pos >= self.params.length {
                 break;
             }
-            let want = if self.params.count > 0 {
-                block_size.min(self.params.count - pos)
+            let want = if self.params.length > 0 {
+                transfer.min(self.params.length - pos)
             } else {
-                block_size
+                transfer
             };
             let src_off = self.params.skip + pos;
             let n = self
@@ -485,10 +512,48 @@ fn detect_size(file: &mut File) -> Option<u64> {
     file.seek(SeekFrom::End(0)).ok()
 }
 
+/// Round `value` down to a multiple of `align`. `align == 0` leaves it unchanged.
+fn align_down(value: u64, align: u64) -> u64 {
+    if align == 0 {
+        value
+    } else {
+        value - value % align
+    }
+}
+
+/// nix-generated wrappers for the block-device ioctls we need.
+mod ioctl {
+    // BLKSSZGET — logical sector size, `_IO(0x12, 104)` == 0x1268, returns an int.
+    nix::ioctl_read_bad!(blksszget, 0x1268, nix::libc::c_int);
+}
+
+/// Detect the logical sector size of a source. Block devices report it via
+/// `BLKSSZGET`; everything else (regular files, pipes, an ioctl failure) falls
+/// back to [`DEFAULT_SECTOR_SIZE`].
+fn detect_sector_size(file: &File) -> u64 {
+    use std::os::unix::io::AsRawFd;
+    let is_block = file
+        .metadata()
+        .is_ok_and(|m| m.file_type().is_block_device());
+    if !is_block {
+        return DEFAULT_SECTOR_SIZE;
+    }
+    let mut size: nix::libc::c_int = 0;
+    // SAFETY: BLKSSZGET writes a single c_int through the pointer; the fd is
+    // valid for the duration of the call.
+    match unsafe { ioctl::blksszget(file.as_raw_fd(), &raw mut size) } {
+        Ok(_) => u64::try_from(size)
+            .ok()
+            .filter(|&s| s > 0)
+            .unwrap_or(DEFAULT_SECTOR_SIZE),
+        Err(_) => DEFAULT_SECTOR_SIZE,
+    }
+}
+
 /// Compute the copy domain length from the detected source size, `skip`, and
-/// `count`. `0` means "unknown / copy until end-of-input".
-fn domain_length(src_size: Option<u64>, skip: u64, count: u64) -> u64 {
-    match (src_size.map(|s| s.saturating_sub(skip)), count) {
+/// `length`. `0` means "unknown / copy until end-of-input".
+fn domain_length(src_size: Option<u64>, skip: u64, length: u64) -> u64 {
+    match (src_size.map(|s| s.saturating_sub(skip)), length) {
         (Some(available), 0) => available,
         (Some(available), limit) => available.min(limit),
         (None, 0) => 0,

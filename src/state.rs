@@ -58,8 +58,9 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    /// Current state-file format version.
-    pub const VERSION: u32 = 1;
+    /// Current state-file format version. Bumped to 2 when the flat `block_size`
+    /// / `count` params became `sector_size` / `transfer_size` / `length`.
+    pub const VERSION: u32 = 2;
 
     /// Build a state file from the live copy state.
     #[must_use]
@@ -107,10 +108,18 @@ impl StateFile {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| Error::io(format!("reading state file '{}'", path.display()), e))?;
-        toml::from_str(&text).map_err(|source| Error::StateParse {
+        let state: Self = toml::from_str(&text).map_err(|source| Error::StateParse {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        if state.meta.version > Self::VERSION {
+            tracing::warn!(
+                found = state.meta.version,
+                supported = Self::VERSION,
+                "state file was written by a newer exhume; proceeding may misbehave"
+            );
+        }
+        Ok(state)
     }
 
     /// Load the state file if it exists, otherwise `None`.
@@ -157,10 +166,11 @@ mod tests {
         RunParams {
             source: PathBuf::from("/dev/sdb"),
             target: PathBuf::from("grave.img"),
-            block_size: 1 << 20,
+            sector_size: 512,
+            transfer_size: 1 << 20,
             skip: 0,
             seek: 0,
-            count: 0,
+            length: 0,
             skip_unchanged: false,
             skip_zeros: false,
         }

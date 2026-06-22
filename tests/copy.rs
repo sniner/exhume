@@ -33,13 +33,13 @@ fn copies_a_file_byte_for_byte() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
     let dst = dir.path().join("out.img");
-    let data = pattern(300 * 1024); // spans several default-ish blocks
+    let data = pattern(300 * 1024); // spans several transfer blocks
     fs::write(&src, &data).unwrap();
 
     exhume()
         .arg(&src)
         .arg(&dst)
-        .arg("--block-size")
+        .arg("--transfer-size")
         .arg("64K")
         .assert()
         .success()
@@ -106,7 +106,7 @@ fn refuses_to_overwrite_without_force() {
 }
 
 #[test]
-fn honours_skip_seek_and_count() {
+fn honours_skip_seek_and_length() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
     let dst = dir.path().join("out.img");
@@ -121,9 +121,9 @@ fn honours_skip_seek_and_count() {
         .arg("1K")
         .arg("--seek")
         .arg("512")
-        .arg("--count")
+        .arg("--length")
         .arg("2K")
-        .arg("--block-size")
+        .arg("--transfer-size")
         .arg("512")
         .assert()
         .success();
@@ -152,7 +152,7 @@ fn skip_unchanged_writes_only_changed_blocks() {
         .arg(&state)
         .arg("--skip-unchanged")
         .arg("--force")
-        .arg("--block-size")
+        .arg("--transfer-size")
         .arg("4K")
         .assert()
         .success()
@@ -182,7 +182,7 @@ fn skip_zeros_leaves_zero_blocks_unwritten_but_correct() {
         .arg(&dst)
         .arg(&state)
         .arg("--skip-zeros")
-        .arg("--block-size")
+        .arg("--transfer-size")
         .arg("4K")
         .assert()
         .success()
@@ -214,7 +214,7 @@ fn retry_recovers_bad_regions_from_a_readable_source() {
     // real read errors, so we inject the bad region directly).
     let seeded = format!(
         r#"[meta]
-version = 1
+version = 2
 program = "exhume"
 program_version = "0.0.0"
 created = "2026-06-18T08:00:00Z"
@@ -223,10 +223,11 @@ updated = "2026-06-18T08:00:00Z"
 [params]
 source = "{src}"
 target = "{dst}"
-block_size = 4096
+sector_size = 512
+transfer_size = 4096
 skip = 0
 seek = 0
-count = 0
+length = 0
 skip_unchanged = false
 skip_zeros = false
 
@@ -262,15 +263,13 @@ status = "done"
     assert_eq!(&fs::read(&dst).unwrap()[8192..12288], &[0u8; 4096][..]);
 
     // Re-seed (the run above rewrote the state) and retry: the bad region is
-    // re-read from the readable source in 2 KiB chunks and recovered.
+    // re-read from the readable source and recovered.
     fs::write(&state, &seeded).unwrap();
     exhume()
         .arg(&src)
         .arg(&dst)
         .arg(&state)
         .arg("--retry")
-        .arg("--retry-block-size")
-        .arg("2K")
         .assert()
         .success()
         .stdout(predicate::str::contains("Done"));
