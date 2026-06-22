@@ -58,9 +58,11 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    /// Current state-file format version. Bumped to 2 when the flat `block_size`
-    /// / `count` params became `sector_size` / `transfer_size` / `length`.
-    pub const VERSION: u32 = 2;
+    /// Current state-file format version. Starts at 1 with the first release;
+    /// the pre-release schema churn (the flat `block_size` / `count` becoming
+    /// `sector_size` / `transfer_size` / `length`) needs no bump, as no v1 file
+    /// with the old layout was ever shipped.
+    pub const VERSION: u32 = 1;
 
     /// Build a state file from the live copy state.
     #[must_use]

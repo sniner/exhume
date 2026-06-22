@@ -95,7 +95,7 @@ The state file is plain TOML and safe to read or hand-edit:
 
 ```toml
 [meta]
-version = 2
+version = 1
 program = "exhume"
 program_version = "0.1.0"
 created = "2026-06-18T08:00:00Z"

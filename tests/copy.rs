@@ -239,7 +239,7 @@ fn retry_recovers_bad_regions_from_a_readable_source() {
     // real read errors, so we inject the bad region directly).
     let seeded = format!(
         r#"[meta]
-version = 2
+version = 1
 program = "exhume"
 program_version = "0.0.0"
 created = "2026-06-18T08:00:00Z"
