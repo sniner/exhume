@@ -22,6 +22,12 @@ exhume aims for the middle: **sane positional arguments, safe defaults, progress
 by default, and a human-readable TOML state file** that makes a run resumable by
 simply re-running the same command.
 
+**Scope.** exhume is for sunny days and light rain — imaging, refreshing, and
+surviving the *occasional* read error, primarily on flash/SSD. For a dying hard
+disk, hours of scraping, or heavy damage, reach for **GNU ddrescue**: it is built
+for the storm. exhume deliberately stops short of that rather than read a failing
+medium to death.
+
 ## Usage
 
 ```
@@ -36,11 +42,18 @@ exhume [OPTIONS] <SOURCE> [TARGET] [STATE]
 
 Options:
 
-- `-b, --block-size <SIZE>` — block size (default `1M`). Accepts `512`, `64K`,
-  `1M`, `1.5G`, `4KiB`, `1MB`, …
-- `-c, --count <SIZE>` — copy at most this many bytes (`0` = whole source)
-- `--skip <SIZE>` — skip this many bytes at the start of the source
-- `--seek <SIZE>` — seek this many bytes into the target before writing
+- `--sector-size <SIZE>` — logical sector size: the alignment and recovery
+  granularity. Auto-detected from block devices (falls back to `512`); override
+  only if you must. Accepts `512`, `64K`, `1M`, `1.5G`, `4KiB`, `1MB`, …
+- `-t, --transfer-size <SIZE>` — I/O size for healthy reads (default `1M`),
+  aligned down to a whole number of sectors. A smaller value also makes the
+  `--skip-*` modes act at a finer granularity.
+- `-l, --length <SIZE>` — copy at most this many bytes (`0` = whole source)
+- `--skip <SIZE>` — skip this many bytes at the start of the source. Must be a
+  whole number of sectors; a misaligned value is rejected with the nearest
+  aligned values suggested.
+- `--seek <SIZE>` — seek this many bytes into the target before writing. Must be
+  a whole number of sectors, as for `--skip`.
 - `--skip-unchanged` — only write blocks that differ from the current target
   contents (reads the target block to compare first). For *refreshing* an
   existing image or clone — saves writes on SSDs/flash and keeps CoW/snapshot
@@ -56,10 +69,8 @@ Options:
   used on an occupied target. A regular-file target is always extended to the full
   size at the end (as a sparse hole) even if the trailing blocks were skipped.
 - `--retry` — re-read regions marked `bad` in a previous run (resume) and
-  recover what is now readable. One pass per invocation; re-run for more.
-- `--retry-block-size <SIZE>` — block size for `--retry` reads (default:
-  `--block-size`). A smaller value salvages more of a partially-readable bad
-  block: the bad region is split into the readable (`done`) and still-bad parts.
+  recover what is now readable, at sector granularity. One pass per invocation;
+  re-run for more.
 - `-f, --force` — overwrite an existing, non-empty target
 - `-q, --quiet` — suppress the progress bar
 - `-v, --verbose` — increase log verbosity (`-v`, `-vv`, `-vvv`)
@@ -75,8 +86,8 @@ treats that as your intent to continue and proceeds without `--force`.
 Progress is checkpointed to the state file periodically and on `Ctrl-C`. To
 resume, run the same command again — exhume reads the state file and copies only
 the regions that are still untried. Parameters recorded in the state file
-(block size, offsets, …) are reused unless you override them on the command
-line, in which case the command line wins.
+(sector and transfer size, offsets, …) are reused unless you override them on
+the command line, in which case the command line wins.
 
 ## State file
 
@@ -84,7 +95,7 @@ The state file is plain TOML and safe to read or hand-edit:
 
 ```toml
 [meta]
-version = 1
+version = 2
 program = "exhume"
 program_version = "0.1.0"
 created = "2026-06-18T08:00:00Z"
@@ -93,14 +104,16 @@ updated = "2026-06-18T08:05:00Z"
 [params]
 source = "/dev/sdb"
 target = "grave.img"
-block_size = 1048576
+sector_size = 512
+transfer_size = 1048576
 skip = 0
 seek = 0
-count = 0
+length = 0
 
 [progress]
 bytes_total = 2000398934016
 bytes_done = 1048576
+bytes_written = 1048576
 errors = 0
 
 [[regions]]
@@ -113,10 +126,11 @@ status = "done"
 
 ## Status
 
-Early days. The tool does block-wise copy with progress, a state file, resume,
-read-error tolerance (bad blocks are recorded and skipped), the
-`--skip-unchanged` / `--skip-zeros` write-reduction modes, and a `--retry` pass
-for `bad` regions. Planned: reverse-direction reads and a `--json` status mode.
+Early days. The tool does block-wise copy with progress, a human-readable state
+file, resume, sector-aware read-error handling (a failed transfer block is
+isolated down to the dead sectors), the `--skip-unchanged` / `--skip-zeros`
+write-reduction modes, and a `--retry` pass for `bad` regions. Planned: an
+`O_DIRECT` mode so retries bypass the page cache, and a `--json` status mode.
 
 ## License
 

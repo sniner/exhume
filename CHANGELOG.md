@@ -17,7 +17,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   only still-untried regions; recorded parameters are reused unless overridden on
   the command line
 - **Read-error tolerance** — read errors are recorded as `bad` regions and skipped
-  instead of aborting the copy
+  instead of aborting the copy. A failed transfer block is re-read sector by
+  sector, so only the genuinely unreadable sectors are lost — a single bad sector
+  costs one sector, not the whole transfer block
 - **`--skip-unchanged`** — reads each target block and writes only the ones that
   differ from the source, for refreshing an existing image/clone with minimal
   writes; the summary and state file report bytes written separately from bytes
@@ -28,12 +30,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   produce a correctly sized, sparse image. Warns when used on an occupied target,
   where pre-existing data would survive. Combinable with `--skip-unchanged`
 - **`--retry`** — re-reads regions previously recorded as `bad` and recovers
-  what is now readable, flipping them to `done`. `--retry-block-size` reads them
-  in smaller chunks to salvage the readable part of a partially-bad block. One
-  pass per run; not sticky (each retry is opt-in, to avoid hammering failing
-  media on every resume)
+  what is now readable, flipping them to `done`, at sector granularity. One pass
+  per run; not sticky (each retry is opt-in, to avoid hammering failing media on
+  every resume)
 - **Overwrite safety** — writing to an existing block device or non-empty file
   requires `--force`; an existing matching state file enables resume instead
-- Size arguments (`--block-size`, `--count`, `--skip`, `--seek`) accept
-  human-readable suffixes (`64K`, `1M`, `1.5G`, `4KiB`, `1MB`)
+- **Sector-aware copy** — the logical sector size is auto-detected from block
+  devices (`BLKSSZGET`, falling back to 512 bytes) and used as the alignment and
+  recovery granularity; healthy reads use a larger `--transfer-size` (default
+  `1M`) aligned down to it. `--sector-size` overrides the detection. `--skip` and
+  `--seek` must be whole sectors and are rejected up front otherwise, with the
+  nearest aligned values suggested
+- Size arguments (`--sector-size`, `--transfer-size`, `--length`, `--skip`,
+  `--seek`) accept human-readable suffixes (`64K`, `1M`, `1.5G`, `4KiB`, `1MB`)
 - Progress bar with throughput and ETA (suppressible with `--quiet`)
