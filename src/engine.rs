@@ -3,6 +3,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Seek, SeekFrom};
+use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{FileExt, FileTypeExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -148,6 +149,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         map,
         prior_written,
         transfer,
+        false,
     );
     let interrupted = copier.drive(cli.retry)?;
 
@@ -207,7 +209,7 @@ fn resolve_params(
         }
     }
 
-    // Offsets must sit on the sector grid (the map stays aligned; O_DIRECT later
+    // Offsets must sit on the sector grid (the map stays aligned; `O_DIRECT` later
     // depends on it). `length` is exempt — its tail rounds up.
     require_sector_aligned("skip", params.skip, params.sector_size)?;
     require_sector_aligned("seek", params.seek, params.sector_size)?;
@@ -265,7 +267,10 @@ struct Copier<'a> {
     /// Bytes actually written to the target (carried across resumes); excludes
     /// blocks skipped in skip-unchanged mode because they already matched.
     bytes_written: u64,
-    buf: Vec<u8>,
+    /// Read source reads with `O_DIRECT` (bypass the page cache). Requires
+    /// sector-aligned offsets and lengths, satisfied by the sector model.
+    direct: bool,
+    buf: AlignedBuf,
     /// Scratch buffer for the skip-unchanged comparison; empty when disabled.
     cmp_buf: Vec<u8>,
     last_flush: Instant,
@@ -288,6 +293,7 @@ impl<'a> Copier<'a> {
         map: RegionMap,
         bytes_written: u64,
         transfer: u64,
+        direct: bool,
     ) -> Self {
         let buf_size = transfer as usize;
         let cmp_buf = if params.skip_unchanged {
@@ -306,7 +312,8 @@ impl<'a> Copier<'a> {
             transfer,
             map,
             bytes_written,
-            buf: vec![0u8; buf_size],
+            direct,
+            buf: AlignedBuf::new(buf_size, params.sector_size as usize),
             cmp_buf,
             last_flush: Instant::now(),
         }
@@ -340,6 +347,21 @@ impl<'a> Copier<'a> {
         Ok(stopped)
     }
 
+    /// Read up to `want` bytes of the source at `src_off` into the buffer and
+    /// return the number of usable bytes (always `<= want`). The single read
+    /// path for all callers. With `O_DIRECT` the request is rounded up to a whole
+    /// sector (the offset is already sector-aligned), so a short read at the
+    /// file/domain tail is normal and is simply capped back to `want`.
+    fn read_block(&mut self, src_off: u64, want: u64) -> std::io::Result<usize> {
+        let req = if self.direct {
+            align_up(want, self.params.sector_size).min(self.buf.len() as u64)
+        } else {
+            want
+        };
+        let n = self.src.read_at(&mut self.buf[..req as usize], src_off)?;
+        Ok((n as u64).min(want) as usize)
+    }
+
     /// Read and copy every region currently in `status`, using transfer-sized
     /// reads. A read error drops to [`Self::isolate`], which re-reads the failed
     /// transfer block sector-by-sector so only the genuinely unreadable sectors
@@ -357,7 +379,7 @@ impl<'a> Copier<'a> {
                 }
                 let want = self.transfer.min(end - pos);
                 let src_off = self.params.skip + pos;
-                match self.src.read_at(&mut self.buf[..want as usize], src_off) {
+                match self.read_block(src_off, want) {
                     Ok(0) => {
                         warn!(
                             offset = src_off,
@@ -408,7 +430,7 @@ impl<'a> Copier<'a> {
             }
             let want = sector.min(end - pos);
             let src_off = self.params.skip + pos;
-            match self.src.read_at(&mut self.buf[..want as usize], src_off) {
+            match self.read_block(src_off, want) {
                 // Unexpected EOF mid-block: stop, leaving the rest in its prior
                 // status (so the run reports as incomplete rather than guessing).
                 Ok(0) => break,
@@ -471,8 +493,7 @@ impl<'a> Copier<'a> {
             };
             let src_off = self.params.skip + pos;
             let n = self
-                .src
-                .read_at(&mut self.buf[..want as usize], src_off)
+                .read_block(src_off, want)
                 .map_err(|e| Error::io(format!("reading at source offset {src_off}"), e))?;
             if n == 0 {
                 break;
@@ -582,6 +603,48 @@ fn align_down(value: u64, align: u64) -> u64 {
         value
     } else {
         value - value % align
+    }
+}
+
+/// Round `value` up to a multiple of `align`. `align == 0` leaves it unchanged.
+fn align_up(value: u64, align: u64) -> u64 {
+    if align == 0 {
+        value
+    } else {
+        value.div_ceil(align) * align
+    }
+}
+
+/// A heap buffer whose usable slice starts at an address aligned to `align`
+/// bytes — the requirement for `O_DIRECT` reads. No `unsafe`: it over-allocates by
+/// `align` and hands out an aligned sub-slice. `align` must be a power of two
+/// (sector sizes always are), and is expected to divide the eventual reads.
+struct AlignedBuf {
+    raw: Vec<u8>,
+    offset: usize,
+    len: usize,
+}
+
+impl AlignedBuf {
+    fn new(len: usize, align: usize) -> Self {
+        // Over-allocate by `align` so an aligned start always exists inside.
+        // The Vec never grows afterwards, so this address stays valid.
+        let raw = vec![0u8; len + align];
+        let offset = (align - raw.as_ptr().addr() % align) % align;
+        AlignedBuf { raw, offset, len }
+    }
+}
+
+impl Deref for AlignedBuf {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.raw[self.offset..self.offset + self.len]
+    }
+}
+
+impl DerefMut for AlignedBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.raw[self.offset..self.offset + self.len]
     }
 }
 
