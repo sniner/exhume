@@ -18,8 +18,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   the command line
 - **Read-error tolerance** — read errors are recorded as `bad` regions and skipped
   instead of aborting the copy. A failed transfer block is re-read sector by
-  sector, so only the genuinely unreadable sectors are lost — a single bad sector
-  costs one sector, not the whole transfer block
+  sector so only the unreadable part is lost, not the whole block: capped at one
+  page on a buffered source (read-ahead is switched off on the first error), and
+  down to a single sector with `--direct`
 - **`--skip-unchanged`** — reads each target block and writes only the ones that
   differ from the source, for refreshing an existing image/clone with minimal
   writes; the summary and state file report bytes written separately from bytes

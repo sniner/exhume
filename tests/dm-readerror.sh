@@ -173,14 +173,17 @@ STATE2="$WORK/grave2.state"
 EXPECTED2="$WORK/expected2.img"
 "$EXHUME" "$SRC" "$GRAVE2" "$STATE2" --transfer-size 1M -vv || true
 
-# Buffered path: we only assert *correctness* of the copy, not how tightly the
-# bad region was isolated. A buffered read that hits the error can poison a wider
-# range via read-ahead, so isolation extent is best-effort here (precise
-# isolation is Scenario D, with --direct). The image must still be correct: good
-# data copied, every bad region a zero hole.
+# Buffered path: the first read error switches off read-ahead (POSIX_FADV_RANDOM),
+# so isolation no longer balloons to the whole transfer block — it is capped at
+# page granularity (a few KiB), well below 1 MiB. It does not reach the 512 B
+# sector precision of --direct (the page cache works in 4 KiB pages); that is
+# Scenario D. The image must also be correct: good data copied, bad = zero hole.
 [[ "$(grep -c 'status = "bad"' "$STATE2")" -ge 1 ]] || fail "scenario C: no bad region recorded"
 assert_image_correct "$STATE2" "$GRAVE2" "$EXPECTED2" "scenario C"
-echo "  ok: copy correct; $(sum_bad "$STATE2") B marked bad (buffered isolation is best-effort)"
+bad2="$(sum_bad "$STATE2")"
+[[ "$bad2" -gt 0 && "$bad2" -lt 1048576 ]] \
+    || fail "scenario C: buffered isolation ballooned to $bad2 B (read-ahead not capped?)"
+echo "  ok: copy correct; buffered isolation capped at $bad2 B (page-granular, no balloon)"
 
 # ============================================================================
 echo

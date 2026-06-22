@@ -288,6 +288,9 @@ struct Copier<'a> {
     /// Read source reads with `O_DIRECT` (bypass the page cache). Requires
     /// sector-aligned offsets and lengths, satisfied by the sector model.
     direct: bool,
+    /// Set once the first read error has switched off read-ahead on a buffered
+    /// source, so isolation re-reads aren't poisoned beyond the failing page.
+    readahead_off: bool,
     buf: AlignedBuf,
     /// Scratch buffer for the skip-unchanged comparison; empty when disabled.
     cmp_buf: Vec<u8>,
@@ -331,6 +334,7 @@ impl<'a> Copier<'a> {
             map,
             bytes_written,
             direct,
+            readahead_off: false,
             buf: AlignedBuf::new(buf_size, params.sector_size as usize),
             cmp_buf,
             last_flush: Instant::now(),
@@ -437,6 +441,13 @@ impl<'a> Copier<'a> {
     /// odd-length regular file) is read as its remainder. `advance` mirrors
     /// [`Self::process`]. Returns `true` if interrupted.
     fn isolate(&mut self, start: u64, len: u64, advance: bool) -> Result<bool> {
+        // First read error on a buffered source: switch off read-ahead so the
+        // sector-by-sector re-reads below aren't poisoned past the failing page.
+        // (O_DIRECT already bypasses the cache, so it needs none of this.)
+        if !self.direct && !self.readahead_off {
+            disable_readahead(self.src);
+            self.readahead_off = true;
+        }
         let sector = self.params.sector_size;
         let end = start + len;
         let mut pos = start;
@@ -731,6 +742,23 @@ fn verify_direct(file: &File, sector: u64, offset: u64) -> Result<()> {
         _ => Ok(()),
     }
 }
+
+/// Hint the kernel to stop reading ahead on the source. Without this, a buffered
+/// read near a bad sector pulls a wider read-ahead window into one failing bio,
+/// ballooning a single bad byte into a much larger `bad` region; turning it off
+/// caps the loss at one page. Advisory — the result is ignored. No-op off Linux.
+#[cfg(target_os = "linux")]
+fn disable_readahead(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: posix_fadvise on a valid fd with constant arguments; its return is
+    // advisory and intentionally ignored (read-ahead simply stays on if it fails).
+    unsafe {
+        nix::libc::posix_fadvise(file.as_raw_fd(), 0, 0, nix::libc::POSIX_FADV_RANDOM);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disable_readahead(_file: &File) {}
 
 /// Compute the copy domain length from the detected source size, `skip`, and
 /// `length`. `0` means "unknown / copy until end-of-input".
