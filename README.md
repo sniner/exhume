@@ -78,6 +78,10 @@ Options:
   exhume says so and you can retry without it.
 - `-f, --force` — overwrite an existing, non-empty target
 - `-q, --quiet` — suppress the progress bar
+- `--json` — print the final summary as a single JSON object on stdout instead
+  of human-readable text (the progress bar still draws to stderr). The object
+  carries `status` (`completed` / `interrupted` / `errors`), the source/target/
+  state paths, and the byte and bad-region totals
 - `-v, --verbose` — increase log verbosity (`-v`, `-vv`, `-vvv`)
 
 ## Safety
@@ -134,9 +138,9 @@ status = "done"
 Early days. The tool does block-wise copy with progress, a human-readable state
 file, resume, sector-aware read-error handling (a failed transfer block is
 isolated down to the dead sectors), the `--skip-unchanged` / `--skip-zeros`
-write-reduction modes, a `--retry` pass for `bad` regions, and a `--direct`
-(`O_DIRECT`) mode so retries bypass the page cache. Planned: a `--json` status
-mode.
+write-reduction modes, a `--retry` pass for `bad` regions, a `--direct`
+(`O_DIRECT`) mode so retries bypass the page cache, and a `--json` summary for
+scripting.
 
 ## License
 
