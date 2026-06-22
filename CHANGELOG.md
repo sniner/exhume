@@ -33,6 +33,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   what is now readable, flipping them to `done`, at sector granularity. One pass
   per run; not sticky (each retry is opt-in, to avoid hammering failing media on
   every resume)
+- **`--direct`** — reads the source with `O_DIRECT`, bypassing the page cache so
+  a re-read (e.g. under `--retry`) actually reaches the medium instead of being
+  served stale from cache. Reads only; Linux only; opt-in, for failing media
 - **Overwrite safety** — writing to an existing block device or non-empty file
   requires `--force`; an existing matching state file enables resume instead
 - **Sector-aware copy** — the logical sector size is auto-detected from block

@@ -165,5 +165,31 @@ dd if=/dev/zero of="$EXPECTED2" bs=1 seek="$bad_start" count="$bad_len" conv=not
 cmp "$EXPECTED2" "$GRAVE2" || fail "scenario C: image mismatch — rest of the transfer block not recovered"
 echo "  ok: the rest of the transfer block copied byte-exact around the isolated hole"
 
+# ============================================================================
+echo
+echo "=== Scenario D: same isolation, but with --direct (O_DIRECT) ==="
+# The device still carries the 3-sector error zone from Scenario C. Re-image it
+# with --direct: the O_DIRECT read path (aligned buffer/offset/length, short-read
+# tail) must produce the same correct, isolated result on a real block device.
+GRAVE3="$WORK/grave3.img"
+STATE3="$WORK/grave3.state"
+EXPECTED3="$WORK/expected3.img"
+blockdev --flushbufs "$SRC" 2>/dev/null || true
+"$EXHUME" "$SRC" "$GRAVE3" "$STATE3" --transfer-size 1M --direct -vv || true
+
+bad_count="$(grep -c 'status = "bad"' "$STATE3")"
+[[ "$bad_count" -eq 1 ]] || fail "scenario D: expected 1 bad region with --direct, got $bad_count"
+bad_start="$(grep -B2 'status = "bad"' "$STATE3" | grep -m1 'start =' | grep -oE '[0-9]+')"
+bad_len="$(grep -B1 'status = "bad"' "$STATE3" | grep -m1 'length =' | grep -oE '[0-9]+')"
+[[ -n "$bad_start" && -n "$bad_len" ]] || fail "scenario D: could not read the bad region from state"
+[[ "$bad_len" -gt 0 && "$bad_len" -lt 1048576 ]] \
+    || fail "scenario D: isolation failed under --direct (bad region is $bad_len B)"
+echo "  ok: --direct copy isolated only $bad_len B as bad"
+
+cp "$BACK" "$EXPECTED3"
+dd if=/dev/zero of="$EXPECTED3" bs=1 seek="$bad_start" count="$bad_len" conv=notrunc status=none
+cmp "$EXPECTED3" "$GRAVE3" || fail "scenario D: --direct image mismatch around the hole"
+echo "  ok: --direct image byte-exact around the isolated hole"
+
 echo
 echo "ALL CHECKS PASSED"

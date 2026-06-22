@@ -71,6 +71,11 @@ Options:
 - `--retry` — re-read regions marked `bad` in a previous run (resume) and
   recover what is now readable, at sector granularity. One pass per invocation;
   re-run for more.
+- `--direct` — read the source with `O_DIRECT`, bypassing the page cache so a
+  re-read (e.g. under `--retry`) actually hits the medium instead of returning
+  cached bytes. Reads only — the target is written normally. Linux only;
+  primarily for failing devices. If the source's filesystem rejects `O_DIRECT`,
+  exhume says so and you can retry without it.
 - `-f, --force` — overwrite an existing, non-empty target
 - `-q, --quiet` — suppress the progress bar
 - `-v, --verbose` — increase log verbosity (`-v`, `-vv`, `-vvv`)
@@ -129,8 +134,9 @@ status = "done"
 Early days. The tool does block-wise copy with progress, a human-readable state
 file, resume, sector-aware read-error handling (a failed transfer block is
 isolated down to the dead sectors), the `--skip-unchanged` / `--skip-zeros`
-write-reduction modes, and a `--retry` pass for `bad` regions. Planned: an
-`O_DIRECT` mode so retries bypass the page cache, and a `--json` status mode.
+write-reduction modes, a `--retry` pass for `bad` regions, and a `--direct`
+(`O_DIRECT`) mode so retries bypass the page cache. Planned: a `--json` status
+mode.
 
 ## License
 
