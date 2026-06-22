@@ -87,7 +87,7 @@ echo "mapped device: $SRC ($TOTAL_MB MiB, bad region @ ${BAD_OFF_MB} MiB)"
 # ============================================================================
 echo
 echo "=== Scenario A: image a device with a permanent read error ==="
-"$EXHUME" "$SRC" "$GRAVE" "$STATE" --block-size 1M -vv || true
+"$EXHUME" "$SRC" "$GRAVE" "$STATE" --transfer-size 1M -vv || true
 
 # state file must record exactly the bad region we injected
 grep -q 'status = "bad"' "$STATE" || fail "no bad region recorded in state file"
@@ -122,6 +122,48 @@ grep -q 'status = "bad"' "$STATE" && fail "bad region still present after --retr
 echo "  ok: no bad regions remain"
 cmp "$BACK" "$GRAVE" || fail "recovered image does not match source"
 echo "  ok: recovered image matches source byte-for-byte"
+
+# ============================================================================
+echo
+echo "=== Scenario C: a bad zone smaller than the transfer block (eager isolation) ==="
+# A 3-sector error zone sitting *inside* one 1 MiB transfer block. exhume's
+# first transfer read fails; isolation must re-read that block sector-by-sector
+# and mark ONLY the dead sectors bad — not the whole 1 MiB.
+C_OFF_SECT=41060 # 20 MiB + 100 sectors → inside the [20 MiB, 21 MiB) block
+C_LEN_SECT=3
+dmsetup suspend "$NAME"
+dmsetup reload "$NAME" <<EOF
+0 $C_OFF_SECT linear $LOOP 0
+$C_OFF_SECT $C_LEN_SECT error
+$((C_OFF_SECT + C_LEN_SECT)) $((TOTAL_SECT - C_OFF_SECT - C_LEN_SECT)) linear $LOOP $((C_OFF_SECT + C_LEN_SECT))
+EOF
+dmsetup resume "$NAME"
+blockdev --flushbufs "$SRC" 2>/dev/null || true
+udevadm settle 2>/dev/null || true
+
+GRAVE2="$WORK/grave2.img"
+STATE2="$WORK/grave2.state"
+EXPECTED2="$WORK/expected2.img"
+"$EXHUME" "$SRC" "$GRAVE2" "$STATE2" --transfer-size 1M -vv || true
+
+# Exactly one bad region, and it must be far smaller than the 1 MiB transfer
+# block — otherwise isolation failed and marked the whole block bad. We read the
+# region back from the state file so the check is robust to the detected sector
+# size (512 vs 4096): TOML field order is start, length, status.
+bad_count="$(grep -c 'status = "bad"' "$STATE2")"
+[[ "$bad_count" -eq 1 ]] || fail "scenario C: expected 1 bad region, got $bad_count"
+bad_start="$(grep -B2 'status = "bad"' "$STATE2" | grep -m1 'start =' | grep -oE '[0-9]+')"
+bad_len="$(grep -B1 'status = "bad"' "$STATE2" | grep -m1 'length =' | grep -oE '[0-9]+')"
+[[ -n "$bad_start" && -n "$bad_len" ]] || fail "scenario C: could not read the bad region from state"
+[[ "$bad_len" -gt 0 && "$bad_len" -lt 1048576 ]] \
+    || fail "scenario C: bad region is $bad_len B — isolation did not shrink it below the 1 MiB transfer block"
+echo "  ok: isolated only $bad_len B as bad (sub-transfer-block), not the full 1 MiB"
+
+# The rest of the transfer block must be copied byte-exact around the hole.
+cp "$BACK" "$EXPECTED2"
+dd if=/dev/zero of="$EXPECTED2" bs=1 seek="$bad_start" count="$bad_len" conv=notrunc status=none
+cmp "$EXPECTED2" "$GRAVE2" || fail "scenario C: image mismatch — rest of the transfer block not recovered"
+echo "  ok: the rest of the transfer block copied byte-exact around the isolated hole"
 
 echo
 echo "ALL CHECKS PASSED"

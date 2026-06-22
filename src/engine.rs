@@ -336,10 +336,11 @@ impl<'a> Copier<'a> {
     }
 
     /// Read and copy every region currently in `status`, using transfer-sized
-    /// reads. Read errors mark the (sub-)region bad and are skipped; writes are
-    /// fatal. `advance` controls the progress bar: the first untried pass
-    /// advances it, a retry pass re-scans already-counted bytes and passes
-    /// `false`. Returns `true` if interrupted.
+    /// reads. A read error drops to [`Self::isolate`], which re-reads the failed
+    /// transfer block sector-by-sector so only the genuinely unreadable sectors
+    /// are marked bad; writes are fatal. `advance` controls the progress bar:
+    /// the first untried pass advances it, a retry pass re-scans already-counted
+    /// bytes and passes `false`. Returns `true` if interrupted.
     fn process(&mut self, status: RegionStatus, advance: bool) -> Result<bool> {
         for region in self.map.regions_with(status) {
             let mut pos = region.start;
@@ -369,10 +370,9 @@ impl<'a> Copier<'a> {
                         pos += n as u64;
                     }
                     Err(e) => {
-                        warn!(offset = src_off, len = want, error = %e, "read error — marking region bad");
-                        self.map.mark(pos, want, RegionStatus::Bad);
-                        if advance {
-                            self.reporter.inc(want);
+                        warn!(offset = src_off, len = want, error = %e, "read error — isolating bad sectors");
+                        if self.isolate(pos, want, advance)? {
+                            return Ok(true);
                         }
                         pos += want;
                     }
@@ -381,6 +381,65 @@ impl<'a> Copier<'a> {
                     self.flush()?;
                 }
             }
+        }
+        Ok(false)
+    }
+
+    /// Re-read a failed transfer block `[start, start + len)` one sector at a
+    /// time, so a single dead sector costs one sector instead of the whole
+    /// transfer block. Readable sectors are written and marked done; unreadable
+    /// ones are marked bad. A trailing partial sector (only at the tail of an
+    /// odd-length regular file) is read as its remainder. `advance` mirrors
+    /// [`Self::process`]. Returns `true` if interrupted.
+    fn isolate(&mut self, start: u64, len: u64, advance: bool) -> Result<bool> {
+        let sector = self.params.sector_size;
+        let end = start + len;
+        let mut pos = start;
+        let mut bad = 0u64;
+        while pos < end {
+            if interrupted() {
+                self.flush()?;
+                return Ok(true);
+            }
+            let want = sector.min(end - pos);
+            let src_off = self.params.skip + pos;
+            match self.src.read_at(&mut self.buf[..want as usize], src_off) {
+                // Unexpected EOF mid-block: stop, leaving the rest in its prior
+                // status (so the run reports as incomplete rather than guessing).
+                Ok(0) => break,
+                Ok(n) => {
+                    let dst_off = self.params.seek + pos;
+                    self.write_block(dst_off, n)?;
+                    self.map.mark(pos, n as u64, RegionStatus::Done);
+                    if advance {
+                        self.reporter.inc(n as u64);
+                    }
+                    pos += n as u64;
+                }
+                Err(_) => {
+                    self.map.mark(pos, want, RegionStatus::Bad);
+                    if advance {
+                        self.reporter.inc(want);
+                    }
+                    bad += want;
+                    pos += want;
+                }
+            }
+            if self.last_flush.elapsed() >= FLUSH_INTERVAL {
+                self.flush()?;
+            }
+        }
+        if bad == 0 {
+            info!(
+                offset = self.params.skip + start,
+                len, "transfer block fully recovered at sector granularity"
+            );
+        } else {
+            warn!(
+                offset = self.params.skip + start,
+                bad_bytes = bad,
+                "isolated unreadable sectors"
+            );
         }
         Ok(false)
     }
