@@ -133,6 +133,15 @@ status = "done"
 
 `status` is one of `untried`, `done`, or `bad`.
 
+If you don't pass a `STATE` argument, exhume derives `<TARGET>.state` and
+**removes it automatically when the copy finishes with no errors** — a clean run
+leaves no clutter behind (handy too when the target is a block device, where the
+derived path would otherwise be e.g. `/dev/sdb.state`). A state file you name
+explicitly is always kept, and an auto-named one is also kept if the run is
+interrupted or any blocks were unreadable, so you can resume or inspect it. Note
+that once a clean auto-run has removed its state, re-running the same command
+sees an occupied target with no resume consent and will ask for `--force`.
+
 ## Status
 
 Early days. The tool does block-wise copy with progress, a human-readable state

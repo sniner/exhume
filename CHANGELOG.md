@@ -39,6 +39,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   served stale from cache. Reads only; Linux only; opt-in, for failing media
 - **Overwrite safety** — writing to an existing block device or non-empty file
   requires `--force`; an existing matching state file enables resume instead
+- **Auto-named state files are cleaned up** — when no `STATE` argument is given,
+  the derived `<TARGET>.state` is removed after a copy that finishes with no
+  errors, so a clean run leaves nothing behind (including on block-device
+  targets). An explicitly named state file, or one left by an interrupted or
+  error-hitting run, is kept for resume/inspection
 - **Sector-aware copy** — the logical sector size is auto-detected from block
   devices (`BLKSSZGET`, falling back to 512 bytes) and used as the alignment and
   recovery granularity; healthy reads use a larger `--transfer-size` (default

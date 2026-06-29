@@ -1,7 +1,6 @@
 //! End-to-end tests driving the `exhume` binary.
 
 use std::fs;
-use std::path::Path;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -47,12 +46,13 @@ fn copies_a_file_byte_for_byte() {
 
     assert_eq!(fs::read(&dst).unwrap(), data, "target must match source");
 
-    // State file is written next to the target and reports completion.
+    // An auto-named state file (no STATE argument) is removed after a clean,
+    // error-free copy — there is nothing left to resume or inspect.
     let state_path = dir.path().join("out.img.state");
-    let state = fs::read_to_string(&state_path).unwrap();
-    assert!(state.contains("[params]"));
-    assert!(state.contains("status = \"done\""));
-    assert!(!state.contains("\"bad\""));
+    assert!(
+        !state_path.exists(),
+        "auto-named state file should be removed on a clean copy"
+    );
 }
 
 #[test]
@@ -60,13 +60,20 @@ fn rerunning_a_completed_copy_is_a_noop() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
     let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
     fs::write(&src, pattern(128 * 1024)).unwrap();
 
-    exhume().arg(&src).arg(&dst).assert().success();
-    // Second run resumes from the state file (no --force needed) and succeeds.
+    // With an explicit state file it is kept after a clean copy, so re-running
+    // resumes from it (no --force needed) and is a no-op.
+    exhume().arg(&src).arg(&dst).arg(&state).assert().success();
+    assert!(
+        state.exists(),
+        "an explicit state file is kept after a clean copy"
+    );
     exhume()
         .arg(&src)
         .arg(&dst)
+        .arg(&state)
         .assert()
         .success()
         .stdout(predicate::str::contains("Done"));
@@ -316,8 +323,9 @@ fn defaults_target_to_grave_img() {
         .assert()
         .success();
 
-    assert!(Path::new(&dir.path().join("grave.img")).exists());
-    assert!(Path::new(&dir.path().join("grave.img.state")).exists());
+    assert!(dir.path().join("grave.img").exists());
+    // The auto-named state file is removed after the clean copy.
+    assert!(!dir.path().join("grave.img.state").exists());
 }
 
 #[test]

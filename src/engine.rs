@@ -180,7 +180,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     // processed domain even if trailing blocks were skipped (zero or unchanged).
     ensure_len(&dst, params.seek + map.covered_end())?;
 
-    Ok(summarize(
+    let summary = summarize(
         params,
         target,
         state_path,
@@ -188,7 +188,30 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         &map,
         bytes_written,
         interrupted,
-    ))
+    );
+    discard_auto_state(cli.state.is_some(), &summary);
+    Ok(summary)
+}
+
+/// Remove an auto-named state file after a clean, error-free copy: it is just
+/// scaffolding, with nothing left to resume or inspect. A state file the user
+/// named explicitly is always kept. Best-effort — a failure is logged, not fatal.
+fn discard_auto_state(state_explicit: bool, summary: &Summary) {
+    if state_explicit || !summary.completed {
+        return;
+    }
+    match std::fs::remove_file(&summary.state_path) {
+        Ok(()) => info!(
+            state = %summary.state_path.display(),
+            "removed the auto-created state file (copy completed with no errors)"
+        ),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => warn!(
+            state = %summary.state_path.display(),
+            error = %e,
+            "could not remove the auto-created state file"
+        ),
+    }
 }
 
 /// Resolve run parameters from CLI + prior state, then validate them against a
