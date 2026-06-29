@@ -4,6 +4,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-29
+
 ### Added
 
 - Initial release: `exhume <SOURCE> [TARGET] [STATE]` copies a block device or
