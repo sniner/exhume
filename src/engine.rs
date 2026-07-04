@@ -334,7 +334,8 @@ fn validate_resume(
             "detected sector size differs from the state file — keeping the recorded value"
         );
     }
-    for (label, cli_value, recorded) in [("skip", cli.skip, prev.skip), ("seek", cli.seek, prev.seek)]
+    for (label, cli_value, recorded) in
+        [("skip", cli.skip, prev.skip), ("seek", cli.seek, prev.seek)]
     {
         if let Some(value) = cli_value {
             if value != recorded {
@@ -542,10 +543,7 @@ impl<'a> Copier<'a> {
                     // device, …) is not damage at this position — aborting
                     // beats sweeping the rest of the source into `bad`.
                     Err(e) => {
-                        return Err(Error::io(
-                            format!("reading at source offset {src_off}"),
-                            e,
-                        ));
+                        return Err(Error::io(format!("reading at source offset {src_off}"), e));
                     }
                 }
                 if self.last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -604,10 +602,7 @@ impl<'a> Copier<'a> {
                 }
                 // Same rationale as in `process`: a non-media error aborts.
                 Err(e) => {
-                    return Err(Error::io(
-                        format!("reading at source offset {src_off}"),
-                        e,
-                    ));
+                    return Err(Error::io(format!("reading at source offset {src_off}"), e));
                 }
             }
             if self.last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -759,9 +754,8 @@ fn ensure_len(file: &File, len: u64) -> Result<()> {
 /// instead — `/dev` is devtmpfs, where a state file would vanish on reboot,
 /// which is exactly when an interrupted restore needs it.
 fn default_state_path(target: &Path) -> PathBuf {
-    let is_device = std::fs::metadata(target).is_ok_and(|m| {
-        m.file_type().is_block_device() || m.file_type().is_char_device()
-    });
+    let is_device = std::fs::metadata(target)
+        .is_ok_and(|m| m.file_type().is_block_device() || m.file_type().is_char_device());
     if is_device {
         if let Some(name) = target.file_name() {
             let mut s = name.to_owned();

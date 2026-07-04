@@ -320,7 +320,12 @@ fn resuming_with_a_different_target_is_refused() {
     let state = dir.path().join("run.state");
     fs::write(&src, pattern(64 * 1024)).unwrap();
 
-    exhume().arg(&src).arg(&target_a).arg(&state).assert().success();
+    exhume()
+        .arg(&src)
+        .arg(&target_a)
+        .arg(&state)
+        .assert()
+        .success();
 
     // The state file records targetA; reusing it with targetB would credit
     // targetA's progress to targetB (an all-zero file reported as "Done").

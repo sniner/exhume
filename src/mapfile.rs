@@ -39,8 +39,8 @@ fn render(map: &RegionMap, skip: u64) -> String {
         .iter()
         .find(|r| r.status != RegionStatus::Done)
         .map_or_else(|| map.covered_end(), |r| r.start);
-    let finished = map.bytes_with(RegionStatus::Untried) == 0
-        && map.bytes_with(RegionStatus::Bad) == 0;
+    let finished =
+        map.bytes_with(RegionStatus::Untried) == 0 && map.bytes_with(RegionStatus::Bad) == 0;
 
     let mut out = format!(
         "# Mapfile. Created by {} {}\n\

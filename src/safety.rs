@@ -37,7 +37,11 @@ pub fn ensure_source_supported(source: &Path) -> Result<()> {
             "source '{}' is a {} — exhume copies block devices and regular files, \
              not streams (use cat or dd for those)",
             source.display(),
-            if ft.is_fifo() { "pipe (FIFO)" } else { "socket" }
+            if ft.is_fifo() {
+                "pipe (FIFO)"
+            } else {
+                "socket"
+            }
         )));
     }
     Ok(())
