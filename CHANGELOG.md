@@ -2,7 +2,7 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.5.0] - 2026-07-04
 
 The simplification release: fewer flags, no mode combinatorics, and the
 verify/refresh rot-repair loop. Done deliberately now, at 0.x with no
