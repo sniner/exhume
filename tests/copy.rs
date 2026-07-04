@@ -778,6 +778,38 @@ fn verify_without_a_manifest_is_refused() {
 }
 
 #[test]
+fn json_progress_emits_an_ndjson_stream() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    fs::write(&src, pattern(64 * 1024)).unwrap();
+
+    let output = exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg("--json-progress")
+        .arg("--quiet")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let lines: Vec<serde_json::Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every line is valid JSON"))
+        .collect();
+    assert!(lines.len() >= 2, "at least one event plus the summary");
+    // The stream opens with a progress event and ends with the summary.
+    assert_eq!(lines[0]["status"], "running");
+    assert_eq!(lines[0]["phase"], "copy");
+    let last = lines.last().unwrap();
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["bytes_done"], 64 * 1024);
+}
+
+#[test]
 fn status_renders_a_state_file() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

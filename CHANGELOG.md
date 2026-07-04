@@ -20,6 +20,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 - **`--status`** — renders a state file for humans without copying: progress with percentage,
   untried/bad totals, the bad-region list, and manifest coverage. Takes the usual arguments or
   the state file directly (`exhume --status run.state`); `--json` gives the same as JSON
+- **`--json-progress`** — emits NDJSON progress events on stdout (one line every ~2 s, with
+  phase, bytes done/total, and throughput), followed by the final summary as a compact JSON
+  line, so scripts and GUIs no longer have to scrape the progress bar off stderr
 
 ## [0.2.0] - 2026-07-04
 

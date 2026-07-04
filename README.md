@@ -109,7 +109,12 @@ Options:
 - `--json` — print the final summary as a single JSON object on stdout instead
   of human-readable text (the progress bar still draws to stderr). The object
   carries `status` (`completed` / `interrupted` / `errors`), the source/target/
-  state paths, and the byte and bad-region totals
+  state paths, the byte and bad-region totals, and a `verify` object when a
+  verify pass ran
+- `--json-progress` — emit NDJSON progress events on stdout (one line every
+  ~2 s per phase, `"phase": "copy"` / `"verify"`), followed by the final
+  summary as a compact JSON line — for cron jobs, GUIs, and orchestration
+  that would otherwise have to scrape the progress bar off stderr
 - `-v, --verbose` — increase log verbosity (`-v`, `-vv`, `-vvv`)
 
 ## Safety

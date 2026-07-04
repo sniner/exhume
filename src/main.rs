@@ -19,8 +19,10 @@ fn main() -> ExitCode {
 
     match exhume::run(&cli) {
         Ok(summary) => {
-            if cli.json {
-                print_json(&summary);
+            if cli.json || cli.json_progress {
+                // Compact in event-stream mode, so the summary is one NDJSON
+                // line like the progress events before it.
+                print_json(&summary, cli.json_progress);
             } else {
                 print_summary(&summary);
             }
@@ -201,7 +203,7 @@ struct JsonVerify {
 }
 
 /// Render the run outcome as a single JSON object on stdout.
-fn print_json(s: &Summary) {
+fn print_json(s: &Summary, compact: bool) {
     let status = if s.completed {
         "completed"
     } else if s.interrupted {
@@ -233,7 +235,12 @@ fn print_json(s: &Summary) {
         }),
     };
     // Serialisation of this fixed struct cannot fail; fall back rather than panic.
-    match serde_json::to_string_pretty(&report) {
+    let rendered = if compact {
+        serde_json::to_string(&report)
+    } else {
+        serde_json::to_string_pretty(&report)
+    };
+    match rendered {
         Ok(json) => println!("{json}"),
         Err(err) => eprintln!("exhume: failed to render JSON summary: {err}"),
     }

@@ -171,7 +171,12 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     let created = existing.as_ref().map_or_else(Utc::now, |s| s.meta.created);
 
     let processed_start = domain.saturating_sub(map.bytes_with(RegionStatus::Untried));
-    let reporter = Reporter::new(domain, processed_start, cli.quiet);
+    let reporter = Reporter::new(
+        domain,
+        processed_start,
+        cli.quiet,
+        cli.json_progress.then_some("copy"),
+    );
     let prior_written = existing.as_ref().map_or(0, |s| s.progress.bytes_written);
 
     let direct_src = setup_direct(cli, &params, domain)?;
@@ -235,6 +240,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
             transfer,
             hasher,
             cli.quiet,
+            cli.json_progress,
         )?)
     } else {
         if cli.verify {
@@ -273,6 +279,7 @@ fn verify_target(
     transfer: u64,
     hasher: &ChunkHasher,
     quiet: bool,
+    json_progress: bool,
 ) -> Result<VerifyOutcome> {
     let chunk_size = hasher.chunk_size();
     let grid = if domain > 0 {
@@ -285,7 +292,7 @@ fn verify_target(
         .filter(|&i| hasher.get(i).is_some())
         .map(|i| chunk_len(i, chunk_size, domain))
         .sum();
-    let reporter = Reporter::new(bytes_total, 0, quiet);
+    let reporter = Reporter::new(bytes_total, 0, quiet, json_progress.then_some("verify"));
 
     let mut outcome = VerifyOutcome {
         chunks_checked: 0,

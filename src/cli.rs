@@ -129,6 +129,12 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Emit NDJSON progress events on stdout (one line every ~2s per phase)
+    /// and the final summary as a compact JSON line — for cron jobs, GUIs,
+    /// and orchestration. Implies --json for the summary
+    #[arg(long)]
+    pub json_progress: bool,
+
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
