@@ -82,6 +82,11 @@ pub struct Cli {
     #[arg(short, long)]
     pub force: bool,
 
+    /// Proceed even if the target device (or a partition / stacked device on
+    /// it) is mounted. Dangerous: writing under a live filesystem corrupts it
+    #[arg(long)]
+    pub allow_mounted: bool,
+
     /// Suppress the progress bar
     #[arg(short, long)]
     pub quiet: bool,

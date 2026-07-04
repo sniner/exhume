@@ -77,6 +77,9 @@ Options:
   primarily for failing devices. If the source's filesystem rejects `O_DIRECT`,
   exhume says so and you can retry without it.
 - `-f, --force` — overwrite an existing, non-empty target
+- `--allow-mounted` — proceed even if the target device (or a partition /
+  stacked device on it) is mounted. Dangerous: writing under a live filesystem
+  corrupts it; this is deliberately separate from `--force`
 - `-q, --quiet` — suppress the progress bar
 - `--json` — print the final summary as a single JSON object on stdout instead
   of human-readable text (the progress bar still draws to stderr). The object
@@ -86,9 +89,25 @@ Options:
 
 ## Safety
 
-Writing to an existing block device or a non-empty file requires `--force`. The
-one exception is a **resume**: if a matching state file already exists, exhume
-treats that as your intent to continue and proceeds without `--force`.
+exhume refuses the classic `dd` footguns before a single byte is written:
+
+- Writing to an existing block device or a non-empty file requires `--force`.
+  The one exception is a **resume**: if a matching state file already exists,
+  exhume treats that as your intent to continue and proceeds without `--force`.
+- A **mounted target** device — itself, one of its partitions, or a stacked
+  device on it (LVM, dm-crypt, MD, active swap) — is refused even with
+  `--force`; only the explicit `--allow-mounted` overrides it. A mounted
+  *source* just warns: the image may be inconsistent.
+- **Source == target** (also aliased through symlinks or hardlinks) is refused.
+- A block-device target **too small** for the copy is refused up front, not
+  discovered as a write error at the capacity boundary hours in.
+- A resumed **state file must match the command line**: a different target, or
+  conflicting `--skip` / `--seek` / `--sector-size` values, abort the run
+  instead of silently reusing a region map that no longer applies.
+
+Sources must be block devices or (character-device / regular) files; pipes and
+sockets are rejected with a pointer to `cat`/`dd` — exhume reads by offset and
+deliberately stays out of the streaming business.
 
 ## Resuming
 
@@ -148,8 +167,8 @@ Early days. The tool does block-wise copy with progress, a human-readable state
 file, resume, sector-aware read-error handling (a failed transfer block is
 isolated down to the dead sectors), the `--skip-unchanged` / `--skip-zeros`
 write-reduction modes, a `--retry` pass for `bad` regions, a `--direct`
-(`O_DIRECT`) mode so retries bypass the page cache, and a `--json` summary for
-scripting.
+(`O_DIRECT`) mode so retries bypass the page cache, a `--json` summary for
+scripting, and the preflight safety checks described above.
 
 ## License
 

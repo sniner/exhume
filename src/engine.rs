@@ -73,6 +73,9 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     let existing = StateFile::load_if_exists(&state_path)?;
     let resuming = existing.is_some();
 
+    // Checked on the path, before the open: opening a FIFO would block forever.
+    crate::safety::ensure_source_supported(&cli.source)?;
+
     // Open the source early: the sector size is probed from it and feeds
     // parameter resolution.
     let mut src = File::open(&cli.source)
@@ -85,12 +88,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     // never below one sector.
     let transfer = align_down(params.transfer_size, params.sector_size).max(params.sector_size);
 
-    // Overwrite safety: an existing, occupied target needs --force, unless a
-    // state file is present (which signals an intentional resume).
-    let occupied = target_occupied(&target)?;
-    if !resuming && !cli.force && occupied {
-        return Err(Error::TargetExists(target));
-    }
+    let occupied = guard_target(cli, &target, resuming)?;
 
     if let Some(prev) = &existing {
         if prev.params.source != params.source {
@@ -126,6 +124,10 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         .map_err(|e| Error::io(format!("opening target '{}'", target.display()), e))?;
 
     let domain = domain_length(detect_size(&mut src), params.skip, params.length);
+
+    // With source size and target capacity both known, a too-small target can
+    // fail now instead of at the capacity boundary hours in.
+    crate::safety::ensure_target_capacity(&dst, &target, params.seek, domain)?;
 
     let mut map = match &existing {
         Some(state) => state.region_map(),
@@ -195,6 +197,22 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     );
     discard_auto_state(cli.state.is_some(), &summary);
     Ok(summary)
+}
+
+/// The write-side guards, run before the target is opened: refuse to copy a
+/// file onto itself; an existing, occupied target needs `--force`, unless a
+/// state file is present (which signals an intentional resume); a mounted
+/// target device is refused outright (`--force` does not cover corrupting a
+/// live filesystem). Returns whether the target was occupied, which the
+/// `--skip-zeros` warning needs later.
+fn guard_target(cli: &Cli, target: &Path, resuming: bool) -> Result<bool> {
+    crate::safety::ensure_not_same_file(&cli.source, target)?;
+    let occupied = target_occupied(target)?;
+    if !resuming && !cli.force && occupied {
+        return Err(Error::TargetExists(target.to_path_buf()));
+    }
+    crate::safety::check_mounted(&cli.source, target, cli.allow_mounted)?;
+    Ok(occupied)
 }
 
 /// Remove an auto-named state file after a clean, error-free copy: it is just

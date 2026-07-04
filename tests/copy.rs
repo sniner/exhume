@@ -458,6 +458,50 @@ status = "untried"
 }
 
 #[test]
+fn refuses_to_copy_a_file_onto_itself() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let data = pattern(4096);
+    fs::write(&src, &data).unwrap();
+
+    // Also aliased through a symlink — same inode, different path.
+    let alias = dir.path().join("alias.img");
+    std::os::unix::fs::symlink(&src, &alias).unwrap();
+
+    for target in [&src, &alias] {
+        exhume()
+            .arg(&src)
+            .arg(target)
+            .arg("--force")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("same file"));
+    }
+    assert_eq!(fs::read(&src).unwrap(), data, "source must be untouched");
+}
+
+#[test]
+fn refuses_a_fifo_source() {
+    let dir = tempdir().unwrap();
+    let fifo = dir.path().join("stream");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(status.success(), "mkfifo failed");
+
+    // Must fail on the path check — opening a writerless FIFO would block, so
+    // guard the regression case with a timeout.
+    exhume()
+        .timeout(std::time::Duration::from_secs(10))
+        .arg(&fifo)
+        .arg(dir.path().join("out.img"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pipe (FIFO)"));
+}
+
+#[test]
 fn defaults_target_to_grave_img() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

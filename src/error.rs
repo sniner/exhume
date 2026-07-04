@@ -35,6 +35,12 @@ pub enum Error {
     )]
     TargetExists(PathBuf),
 
+    /// A preflight safety check refused the copy: source and target are the
+    /// same file, the target is mounted or too small, or the source type is
+    /// unsupported. The carried message names the problem and the way out.
+    #[error("{0}")]
+    Refused(String),
+
     /// A command-line parameter conflicts with the resumed state file (the
     /// region map's coordinates depend on target, skip, seek, and the sector
     /// grid, so a silent mismatch would corrupt the copy). The carried message

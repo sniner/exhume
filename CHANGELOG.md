@@ -4,7 +4,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+
+- **Preflight safety checks** — exhume now refuses, before writing anything: a target device
+  that is mounted (itself, a partition, or a stacked LVM/dm-crypt/MD device on it, including
+  active swap) unless the new `--allow-mounted` is passed; a source and target that are the
+  same file (also via symlink/hardlink aliases); and a block-device target too small to hold
+  the copy. A mounted *source* warns that the image may be inconsistent
+
 ### Changed
+
+- **Streams are rejected up front** — a pipe (FIFO) or socket source now fails immediately with
+  a clear message; exhume reads by offset, so streams never actually worked (they died mid-run
+  with "Illegal seek") and staying out of the streaming business is deliberate — use `cat` or
+  `dd` for those
 
 - **Ctrl-C** — the first interrupt now announces on stderr that exhume is finishing the current
   block and saving state; a second Ctrl-C (or SIGTERM) aborts immediately — useful when a read
