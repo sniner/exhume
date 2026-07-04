@@ -17,6 +17,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   with `--verify` copies nothing and just verifies — a bit-rot check for archived images that
   needs neither the source nor a byte of copying. The `--json` summary carries the result in a
   `verify` object
+- **`--status`** — renders a state file for humans without copying: progress with percentage,
+  untried/bad totals, the bad-region list, and manifest coverage. Takes the usual arguments or
+  the state file directly (`exhume --status run.state`); `--json` gives the same as JSON
 
 ## [0.2.0] - 2026-07-04
 

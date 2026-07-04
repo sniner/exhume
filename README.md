@@ -97,6 +97,10 @@ Options:
   cached bytes. Reads only — the target is written normally. Linux only;
   primarily for failing devices. If the source's filesystem rejects `O_DIRECT`,
   exhume says so and you can retry without it.
+- `--status` — show the state (progress, bad regions, manifest coverage)
+  without copying anything. Works with the usual arguments (`exhume /dev/sdb
+  backup.img --status`) or pointed straight at a state file (`exhume --status
+  run.state`). With `--json`, machine-readable.
 - `-f, --force` — overwrite an existing, non-empty target
 - `--allow-mounted` — proceed even if the target device (or a partition /
   stacked device on it) is mounted. Dangerous: writing under a live filesystem

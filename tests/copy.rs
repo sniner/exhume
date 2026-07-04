@@ -778,6 +778,54 @@ fn verify_without_a_manifest_is_refused() {
 }
 
 #[test]
+fn status_renders_a_state_file() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(16 * 1024)).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .assert()
+        .success();
+
+    // The state file itself as the only positional argument.
+    exhume()
+        .arg("--status")
+        .arg(&state)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Progress: 16.00 KiB"))
+        .stdout(predicate::str::contains("blake3"))
+        .stdout(predicate::str::contains("4 of 4 hashed"));
+
+    // The same via the copy arguments, as JSON.
+    let output = exhume()
+        .arg("--status")
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(report["bytes_done"], 16 * 1024);
+    assert_eq!(report["bytes_untried"], 0);
+    assert_eq!(report["hashes"]["chunks_hashed"], 4);
+
+    // --status must not have touched anything.
+    assert_eq!(fs::read(&dst).unwrap(), fs::read(&src).unwrap());
+}
+
+#[test]
 fn export_map_writes_a_ddrescue_mapfile() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

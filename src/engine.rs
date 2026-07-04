@@ -1064,7 +1064,7 @@ fn ensure_len(file: &File, len: u64) -> Result<()> {
 /// file. For a device target, `<basename>.state` in the current directory
 /// instead — `/dev` is devtmpfs, where a state file would vanish on reboot,
 /// which is exactly when an interrupted restore needs it.
-fn default_state_path(target: &Path) -> PathBuf {
+pub(crate) fn default_state_path(target: &Path) -> PathBuf {
     let is_device = std::fs::metadata(target)
         .is_ok_and(|m| m.file_type().is_block_device() || m.file_type().is_char_device());
     if is_device {

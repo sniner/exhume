@@ -15,6 +15,7 @@ pub mod progress;
 pub mod region;
 pub mod safety;
 pub mod state;
+pub mod status;
 
 pub use engine::{Summary, run};
 pub use error::{Error, Result};

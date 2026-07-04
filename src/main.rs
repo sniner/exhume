@@ -13,6 +13,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
+    if cli.status {
+        return print_status(&cli);
+    }
+
     match exhume::run(&cli) {
         Ok(summary) => {
             if cli.json {
@@ -46,6 +50,27 @@ fn init_tracing(verbose: u8) {
         .with_writer(std::io::stderr)
         .without_time()
         .init();
+}
+
+/// `--status` mode: load, render, done — nothing is copied.
+fn print_status(cli: &Cli) -> ExitCode {
+    match exhume::status::report(cli) {
+        Ok(report) => {
+            if cli.json {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(json) => println!("{json}"),
+                    Err(err) => eprintln!("exhume: failed to render JSON status: {err}"),
+                }
+            } else {
+                print!("{}", exhume::status::render(&report));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("exhume: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Render the run outcome to stdout (the program's intentional output).

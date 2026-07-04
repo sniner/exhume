@@ -105,6 +105,12 @@ pub struct Cli {
     #[arg(long)]
     pub direct: bool,
 
+    /// Show the state (progress, bad regions, manifest coverage) without
+    /// copying anything. Give the usual arguments, or the state file directly:
+    /// exhume --status run.state
+    #[arg(long)]
+    pub status: bool,
+
     /// Overwrite an existing, non-empty target
     #[arg(short, long)]
     pub force: bool,
