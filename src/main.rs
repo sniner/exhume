@@ -92,7 +92,14 @@ fn print_copy_summary(s: &Summary) {
             s.state_path.display()
         );
     } else if s.completed {
-        if s.skip_unchanged || s.skip_zeros {
+        if s.bytes_done_this_run == 0 && s.bytes_done > 0 {
+            // A no-op resume: the state was already complete.
+            println!(
+                "Already complete — {} in {}; nothing copied this run.",
+                HumanBytes(s.bytes_done),
+                s.target.display()
+            );
+        } else if s.skip_unchanged || s.skip_zeros {
             println!(
                 "Done — scanned {} from {}, wrote {} to {} ({}).",
                 HumanBytes(s.bytes_done),
@@ -178,6 +185,7 @@ struct JsonReport<'a> {
     state: &'a Path,
     bytes_total: u64,
     bytes_done: u64,
+    bytes_done_this_run: u64,
     bytes_written: u64,
     bad_bytes: u64,
     bad_regions: usize,
@@ -218,6 +226,7 @@ fn print_json(s: &Summary, compact: bool) {
         state: &s.state_path,
         bytes_total: s.bytes_total,
         bytes_done: s.bytes_done,
+        bytes_done_this_run: s.bytes_done_this_run,
         bytes_written: s.bytes_written,
         bad_bytes: s.bad_bytes,
         bad_regions: s.bad_regions,

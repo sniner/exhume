@@ -40,6 +40,9 @@ pub struct Summary {
     pub bytes_total: u64,
     /// Bytes scanned and accounted for (read from source, marked done).
     pub bytes_done: u64,
+    /// Bytes newly marked done by *this* run (`0` = a no-op resume: the state
+    /// was already complete and nothing was copied).
+    pub bytes_done_this_run: u64,
     /// Bytes actually written to the target (< `bytes_done` in skip-unchanged mode).
     pub bytes_written: u64,
     pub bad_bytes: u64,
@@ -185,6 +188,9 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     let hasher = setup_hashing(cli, existing.as_ref(), params.sector_size, domain)?;
 
+    // For the summary: how much *this* run contributes (0 = no-op resume).
+    let done_at_start = map.bytes_with(RegionStatus::Done);
+
     let mut copier = Copier::new(
         read_src,
         &dst,
@@ -262,6 +268,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         domain,
         &map,
         bytes_written,
+        done_at_start,
         interrupted,
         verify,
     );
@@ -584,6 +591,7 @@ fn summarize(
     domain: u64,
     map: &RegionMap,
     bytes_written: u64,
+    done_at_start: u64,
     interrupted: bool,
     verify: Option<VerifyOutcome>,
 ) -> Summary {
@@ -594,12 +602,15 @@ fn summarize(
         .count();
     let untried = map.bytes_with(RegionStatus::Untried);
 
+    let bytes_done = map.bytes_with(RegionStatus::Done);
     Summary {
         source: params.source,
         target,
         state_path,
         bytes_total: domain,
-        bytes_done: map.bytes_with(RegionStatus::Done),
+        bytes_done,
+        // saturating: a shrunk domain can clip previously-done regions.
+        bytes_done_this_run: bytes_done.saturating_sub(done_at_start),
         bytes_written,
         bad_bytes: map.bytes_with(RegionStatus::Bad),
         bad_regions,

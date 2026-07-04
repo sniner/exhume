@@ -76,7 +76,7 @@ fn rerunning_a_completed_copy_is_a_noop() {
         .arg(&state)
         .assert()
         .success()
-        .stdout(predicate::str::contains("Done"));
+        .stdout(predicate::str::contains("Already complete"));
 
     assert_eq!(fs::read(&dst).unwrap(), fs::read(&src).unwrap());
 }

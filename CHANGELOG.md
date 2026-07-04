@@ -24,6 +24,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   phase, bytes done/total, and throughput), followed by the final summary as a compact JSON
   line, so scripts and GUIs no longer have to scrape the progress bar off stderr
 
+### Changed
+
+- **No-op resumes say so** — re-running an already completed command now reports
+  "Already complete — … nothing copied this run." instead of a misleading "Done — copied …";
+  the `--json` summary carries the new `bytes_done_this_run` field
+
 ## [0.2.0] - 2026-07-04
 
 Includes the changes of the unpublished 0.1.1.
