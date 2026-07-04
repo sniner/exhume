@@ -144,22 +144,8 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     let reporter = Reporter::new(domain, processed_start, cli.quiet);
     let prior_written = existing.as_ref().map_or(0, |s| s.progress.bytes_written);
 
-    // O_DIRECT (reads only): a separate fd opened with O_DIRECT, used for the
-    // copy so re-reads bypass the page cache and hit the medium. Only for a
-    // seekable source, and only on Linux.
-    let direct = cli.direct && domain > 0 && cfg!(target_os = "linux");
-    if cli.direct && domain == 0 {
-        warn!("--direct ignored: the source is not seekable");
-    } else if cli.direct && !cfg!(target_os = "linux") {
-        warn!("--direct ignored: O_DIRECT is only available on Linux");
-    }
-    let direct_src = if direct {
-        let f = open_source_direct(&cli.source)?;
-        verify_direct(&f, params.sector_size, params.skip)?;
-        Some(f)
-    } else {
-        None
-    };
+    let direct_src = setup_direct(cli, &params, domain)?;
+    let direct = direct_src.is_some();
     let read_src = direct_src.as_ref().unwrap_or(&src);
 
     let mut copier = Copier::new(
@@ -175,7 +161,15 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         transfer,
         direct,
     );
-    let interrupted = copier.drive(cli.retry)?;
+    let interrupted = match copier.drive(cli.retry) {
+        Ok(interrupted) => interrupted,
+        // A fatal error must not lose the progress since the last periodic
+        // checkpoint — flush best-effort, then report the real problem.
+        Err(e) => {
+            let _ = copier.flush();
+            return Err(e);
+        }
+    };
 
     // Persist the final state regardless of how the loop ended.
     copier.flush()?;
@@ -197,6 +191,37 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     );
     discard_auto_state(cli.state.is_some(), &summary);
     Ok(summary)
+}
+
+/// Set up the `O_DIRECT` read side (reads only): a separate fd opened with
+/// `O_DIRECT`, used for the copy so re-reads bypass the page cache and hit the
+/// medium. `None` (with a warning) where it does not apply — a non-seekable
+/// source, or off Linux.
+fn setup_direct(cli: &Cli, params: &RunParams, domain: u64) -> Result<Option<File>> {
+    if !cli.direct {
+        return Ok(None);
+    }
+    if domain == 0 {
+        warn!("--direct ignored: the source is not seekable");
+        return Ok(None);
+    }
+    if !cfg!(target_os = "linux") {
+        warn!("--direct ignored: O_DIRECT is only available on Linux");
+        return Ok(None);
+    }
+    // O_DIRECT wants offsets, lengths, and the buffer aligned to the device's
+    // block granularity; a stray sector size would make every read fail with
+    // EINVAL (which is fatal, not a bad sector), so refuse it up front.
+    if !params.sector_size.is_power_of_two() {
+        return Err(Error::InvalidSize(format!(
+            "--direct requires a power-of-two sector size (O_DIRECT alignment), \
+             but the effective sector size is {}",
+            params.sector_size
+        )));
+    }
+    let f = open_source_direct(&cli.source)?;
+    verify_direct(&f, params.sector_size, params.skip)?;
+    Ok(Some(f))
 }
 
 /// The write-side guards, run before the target is opened: refuse to copy a
@@ -500,12 +525,21 @@ impl<'a> Copier<'a> {
                         }
                         pos += n as u64;
                     }
-                    Err(e) => {
+                    Err(e) if is_media_error(&e) => {
                         warn!(offset = src_off, len = want, error = %e, "read error — isolating bad sectors");
                         if self.isolate(pos, want, advance)? {
                             return Ok(true);
                         }
                         pos += want;
+                    }
+                    // Everything else (EINVAL from O_DIRECT misuse, a vanished
+                    // device, …) is not damage at this position — aborting
+                    // beats sweeping the rest of the source into `bad`.
+                    Err(e) => {
+                        return Err(Error::io(
+                            format!("reading at source offset {src_off}"),
+                            e,
+                        ));
                     }
                 }
                 if self.last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -554,13 +588,20 @@ impl<'a> Copier<'a> {
                     }
                     pos += n as u64;
                 }
-                Err(_) => {
+                Err(e) if is_media_error(&e) => {
                     self.map.mark(pos, want, RegionStatus::Bad);
                     if advance {
                         self.reporter.inc(want);
                     }
                     bad += want;
                     pos += want;
+                }
+                // Same rationale as in `process`: a non-media error aborts.
+                Err(e) => {
+                    return Err(Error::io(
+                        format!("reading at source offset {src_off}"),
+                        e,
+                    ));
                 }
             }
             if self.last_flush.elapsed() >= FLUSH_INTERVAL {
@@ -673,6 +714,19 @@ fn target_differs(dst: &File, dst_off: u64, data: &[u8], cmp_buf: &mut [u8]) -> 
         Ok(n) if n == data.len() => cmp_buf[..n] != *data,
         _ => true,
     }
+}
+
+/// Whether a read error means "this spot of the medium is unreadable" — the
+/// only condition under which sectors are marked `bad` and the copy moves on.
+/// `EIO` is the block layer's damage signal, `EREMOTEIO` its USB-bridge
+/// cousin, `EBADMSG` an integrity (T10 DIF) failure. Anything else — `EINVAL`
+/// from `O_DIRECT` misuse, a vanished device, a bad fd — is not positional
+/// damage, and skipping past it would sweep the rest of the source into `bad`.
+fn is_media_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(nix::libc::EIO | nix::libc::EREMOTEIO | nix::libc::EBADMSG)
+    )
 }
 
 /// Whether every byte in `buf` is zero.

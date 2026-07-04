@@ -458,6 +458,25 @@ status = "untried"
 }
 
 #[test]
+fn direct_refuses_a_non_power_of_two_sector_size() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    fs::write(&src, pattern(8000)).unwrap();
+
+    // 1000 divides the offsets fine but violates O_DIRECT's alignment; without
+    // the up-front check every read would fail with EINVAL.
+    exhume()
+        .arg(&src)
+        .arg(dir.path().join("out.img"))
+        .arg("--direct")
+        .arg("--sector-size")
+        .arg("1000")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("power-of-two sector size"));
+}
+
+#[test]
 fn refuses_to_copy_a_file_onto_itself() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

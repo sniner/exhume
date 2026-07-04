@@ -2,6 +2,19 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Fixed
+
+- **Read errors are classified** — only genuine media errors (`EIO`, `EREMOTEIO`, `EBADMSG`)
+  mark sectors as `bad`; anything else (an `O_DIRECT` alignment problem, a vanished device, …)
+  now aborts the run instead of silently sweeping the rest of the source into `bad`
+- **`--direct`** refuses a non-power-of-two `--sector-size` up front, instead of failing every
+  read with `EINVAL`
+- **State is checkpointed on fatal errors** — a run that dies on a write error (or any other
+  fatal condition) now flushes the state file first, so the progress since the last periodic
+  checkpoint survives
+
 ## [0.1.1] - 2026-07-04
 
 ### Added
