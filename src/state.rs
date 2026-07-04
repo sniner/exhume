@@ -137,21 +137,41 @@ impl StateFile {
         }
     }
 
-    /// Write the state file atomically: serialise to a sibling `*.tmp` file and
-    /// rename over the target, so a crash mid-write never corrupts the state.
+    /// Write the state file atomically: serialise to a sibling `*.tmp` file,
+    /// sync it, and rename over the target, so neither a crash mid-write nor a
+    /// power loss right after the rename can leave a corrupt or empty state
+    /// (the rename may otherwise reach the disk before the data blocks do).
     ///
     /// # Errors
     ///
-    /// Returns an error if serialisation, the temp write, or the rename fails.
+    /// Returns an error if serialisation, the temp write, the sync, or the
+    /// rename fails.
     pub fn save_atomic(&self, path: &Path) -> Result<()> {
+        use std::io::Write;
+
         let text = toml::to_string_pretty(self)?;
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
-        std::fs::write(&tmp, text.as_bytes())
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| Error::io(format!("creating state file '{}'", tmp.display()), e))?;
+        file.write_all(text.as_bytes())
             .map_err(|e| Error::io(format!("writing state file '{}'", tmp.display()), e))?;
+        file.sync_all()
+            .map_err(|e| Error::io(format!("syncing state file '{}'", tmp.display()), e))?;
+        drop(file);
         std::fs::rename(&tmp, path)
             .map_err(|e| Error::io(format!("renaming state file to '{}'", path.display()), e))?;
+        // Best-effort: persist the rename itself (the directory entry). A
+        // failure only means the old state survives a power loss a little
+        // longer — not worth failing the copy over.
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 }

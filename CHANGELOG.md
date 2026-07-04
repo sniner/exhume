@@ -4,7 +4,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Changed
+
+- **Ctrl-C** — the first interrupt now announces on stderr that exhume is finishing the current
+  block and saving state; a second Ctrl-C (or SIGTERM) aborts immediately — useful when a read
+  hangs on failing hardware
+
 ### Fixed
+
+- **State file** — checkpoints are synced to disk before the atomic rename, so a power loss or
+  kernel panic right after a checkpoint can no longer leave an empty state file behind
 
 - **Resume** — a state file recorded for a different target, or `--skip` / `--seek` /
   `--sector-size` values that conflict with the resumed state, are now refused with a clear

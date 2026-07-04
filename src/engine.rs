@@ -862,20 +862,33 @@ fn interrupted() -> bool {
 }
 
 extern "C" fn on_signal(_sig: i32) {
+    // The loop only notices the flag between block reads, and a read on dying
+    // hardware can hang for minutes — without a note the graceful stop looks
+    // like a freeze. `SA_RESETHAND` has already restored the default
+    // disposition, so a second signal aborts hard.
+    const MSG: &[u8] =
+        b"\nexhume: interrupted - finishing the current block and saving state (repeat to abort hard)\n";
     INTERRUPTED.store(true, Ordering::SeqCst);
+    // SAFETY: write(2) to stderr with a static buffer is async-signal-safe;
+    // the result is intentionally ignored (the message is best-effort).
+    unsafe {
+        nix::libc::write(2, MSG.as_ptr().cast(), MSG.len());
+    }
 }
 
-/// Install a handler for SIGINT and SIGTERM that flags the copy loop to stop
-/// and flush its state.
+/// Install a one-shot handler for SIGINT and SIGTERM that flags the copy loop
+/// to stop and flush its state. `SA_RESETHAND` makes it one-shot: the second
+/// Ctrl-C (or SIGTERM) gets the default disposition and kills the process even
+/// if the copy is stuck in an unresponsive read.
 fn install_signal_handler() -> Result<()> {
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
     let action = SigAction::new(
         SigHandler::Handler(on_signal),
-        SaFlags::empty(),
+        SaFlags::SA_RESETHAND,
         SigSet::empty(),
     );
-    // SAFETY: `on_signal` only performs a single atomic store, which is
+    // SAFETY: `on_signal` only performs an atomic store and a write(2), both
     // async-signal-safe; the SigAction outlives the call.
     unsafe {
         sigaction(Signal::SIGINT, &action).map_err(|e| Error::Signal(e.to_string()))?;
