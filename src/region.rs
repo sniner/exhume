@@ -126,6 +126,48 @@ impl RegionMap {
             .sum()
     }
 
+    /// Reconcile the map with a copy domain of `domain` bytes: clip regions
+    /// that reach beyond it and fill uncovered gaps (interior or tail) as
+    /// `Untried`. Needed when a resumed state file was recorded against a
+    /// different domain — a larger `--length`, or a source that changed size —
+    /// so the new tail is actually copied and an out-of-domain remainder is
+    /// not. A `domain` of `0` means "unknown size" and leaves the map alone
+    /// (the sequential path resumes from [`Self::covered_end`]).
+    pub fn reconcile(&mut self, domain: u64) {
+        if domain == 0 {
+            return;
+        }
+        let mut next: Vec<Region> = Vec::with_capacity(self.regions.len() + 2);
+        let mut pos = 0u64;
+        for r in &self.regions {
+            if r.start >= domain {
+                break;
+            }
+            if r.start > pos {
+                next.push(Region {
+                    start: pos,
+                    length: r.start - pos,
+                    status: RegionStatus::Untried,
+                });
+            }
+            let length = r.length.min(domain - r.start);
+            next.push(Region {
+                start: r.start,
+                length,
+                status: r.status,
+            });
+            pos = r.start + length;
+        }
+        if pos < domain {
+            next.push(Region {
+                start: pos,
+                length: domain - pos,
+                status: RegionStatus::Untried,
+            });
+        }
+        self.regions = merge_adjacent(next);
+    }
+
     /// One past the last covered byte (regions are contiguous and sorted, so
     /// this is the highest `end()`), or `0` when empty.
     #[must_use]
@@ -235,6 +277,64 @@ mod tests {
                 (350, 650, RegionStatus::Untried),
             ]
         );
+    }
+
+    #[test]
+    fn reconcile_fills_a_grown_domain_as_untried() {
+        let mut map = RegionMap::from_total(1000);
+        map.mark(0, 1000, RegionStatus::Done);
+        map.reconcile(1500);
+        assert_eq!(
+            statuses(&map),
+            vec![
+                (0, 1000, RegionStatus::Done),
+                (1000, 500, RegionStatus::Untried),
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_clips_a_shrunk_domain() {
+        let mut map = RegionMap::from_total(1000);
+        map.mark(900, 100, RegionStatus::Bad);
+        map.reconcile(950);
+        assert_eq!(
+            statuses(&map),
+            vec![
+                (0, 900, RegionStatus::Untried),
+                (900, 50, RegionStatus::Bad),
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_fills_interior_gaps() {
+        // A hand-edited state file may leave holes between regions.
+        let mut map = RegionMap::from_regions(vec![Region {
+            start: 200,
+            length: 100,
+            status: RegionStatus::Done,
+        }]);
+        map.reconcile(400);
+        assert_eq!(
+            statuses(&map),
+            vec![
+                (0, 200, RegionStatus::Untried),
+                (200, 100, RegionStatus::Done),
+                (300, 100, RegionStatus::Untried),
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_leaves_a_matching_map_and_unknown_domain_alone() {
+        let mut map = RegionMap::from_total(1000);
+        map.mark(0, 500, RegionStatus::Done);
+        let before = map.clone();
+        map.reconcile(1000);
+        assert_eq!(map, before);
+        map.reconcile(0); // unknown size: untouched
+        assert_eq!(map, before);
     }
 
     #[test]

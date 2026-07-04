@@ -4,6 +4,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Resume** — a state file recorded for a different target, or `--skip` / `--seek` /
+  `--sector-size` values that conflict with the resumed state, are now refused with a clear
+  message instead of silently reusing the old region map (previously a state file from another
+  target could produce an all-zero target reported as "Done")
+- **Resume** — the region map is reconciled with the current copy domain: resuming with a larger
+  `--length` (or a grown source) now copies the new tail instead of reporting early completion,
+  and a smaller `--length` no longer copies past the limit
+
 ## [0.1.0] - 2026-06-29
 
 ### Added

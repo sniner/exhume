@@ -35,6 +35,13 @@ pub enum Error {
     )]
     TargetExists(PathBuf),
 
+    /// A command-line parameter conflicts with the resumed state file (the
+    /// region map's coordinates depend on target, skip, seek, and the sector
+    /// grid, so a silent mismatch would corrupt the copy). The carried message
+    /// names the conflict and how to resolve it.
+    #[error("{0}")]
+    StateConflict(String),
+
     /// The state file exists but could not be parsed as exhume state.
     #[error("failed to parse state file '{}': {source}", .path.display())]
     StateParse {

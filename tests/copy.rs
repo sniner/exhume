@@ -312,6 +312,152 @@ status = "done"
 }
 
 #[test]
+fn resuming_with_a_different_target_is_refused() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let target_a = dir.path().join("targetA.img");
+    let target_b = dir.path().join("targetB.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(64 * 1024)).unwrap();
+
+    exhume().arg(&src).arg(&target_a).arg(&state).assert().success();
+
+    // The state file records targetA; reusing it with targetB would credit
+    // targetA's progress to targetB (an all-zero file reported as "Done").
+    exhume()
+        .arg(&src)
+        .arg(&target_b)
+        .arg(&state)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("records target"));
+    assert!(!target_b.exists(), "the refused run must not touch targetB");
+}
+
+#[test]
+fn resuming_with_a_conflicting_skip_is_refused() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(64 * 1024)).unwrap();
+
+    exhume().arg(&src).arg(&dst).arg(&state).assert().success();
+
+    // The region map is relative to the recorded skip; a different value on
+    // resume would shift the whole coordinate system.
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--skip")
+        .arg("512")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "conflicts with the resumed state's skip",
+        ));
+}
+
+#[test]
+fn resume_with_a_larger_length_copies_the_new_tail() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    let data = pattern(64 * 1024);
+    fs::write(&src, &data).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--length")
+        .arg("32K")
+        .assert()
+        .success();
+    assert_eq!(fs::read(&dst).unwrap().len(), 32 * 1024);
+
+    // The resumed map only covers the first 32K; the grown domain's tail must
+    // be copied too, not silently reported as complete.
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--length")
+        .arg("64K")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Done"));
+    assert_eq!(fs::read(&dst).unwrap(), data);
+}
+
+#[test]
+fn resumes_from_a_partial_state() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    let data = pattern(16 * 1024);
+    fs::write(&src, &data).unwrap();
+    // The interrupted run got the first 8 KiB onto the target.
+    fs::write(&dst, &data[..8192]).unwrap();
+
+    let seeded = format!(
+        r#"[meta]
+version = 1
+program = "exhume"
+program_version = "0.0.0"
+created = "2026-06-18T08:00:00Z"
+updated = "2026-06-18T08:00:00Z"
+
+[params]
+source = "{src}"
+target = "{dst}"
+sector_size = 512
+transfer_size = 4096
+skip = 0
+seek = 0
+length = 0
+skip_unchanged = false
+skip_zeros = false
+
+[progress]
+bytes_total = 16384
+bytes_done = 8192
+bytes_written = 8192
+errors = 0
+
+[[regions]]
+start = 0
+length = 8192
+status = "done"
+
+[[regions]]
+start = 8192
+length = 8192
+status = "untried"
+"#,
+        src = src.display(),
+        dst = dst.display()
+    );
+    fs::write(&state, &seeded).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Done"));
+
+    assert_eq!(fs::read(&dst).unwrap(), data);
+    // Only the untried half was written; the write counter carries across.
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(s.contains("bytes_written = 16384"), "state was:\n{s}");
+}
+
+#[test]
 fn defaults_target_to_grave_img() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

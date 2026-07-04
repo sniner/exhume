@@ -127,10 +127,14 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     let domain = domain_length(detect_size(&mut src), params.skip, params.length);
 
-    let map = match &existing {
+    let mut map = match &existing {
         Some(state) => state.region_map(),
         None => RegionMap::from_total(domain),
     };
+    // A resumed map may describe a different domain (changed --length, resized
+    // source): mark the uncovered remainder untried and drop the out-of-domain
+    // overhang, so neither is silently mishandled.
+    map.reconcile(domain);
 
     let created = existing.as_ref().map_or_else(Utc::now, |s| s.meta.created);
 
@@ -232,22 +236,7 @@ fn resolve_params(
     }
 
     if let Some(prev) = existing {
-        if let Some(cli_sector) = cli.sector_size {
-            if cli_sector != prev.params.sector_size {
-                return Err(Error::InvalidSize(format!(
-                    "--sector-size {} conflicts with the resumed state's sector size {} \
-                     (the region map is aligned to the latter; edit or remove the state file \
-                     to change it)",
-                    cli_sector, prev.params.sector_size
-                )));
-            }
-        } else if detected_sector != prev.params.sector_size {
-            warn!(
-                detected = detected_sector,
-                recorded = prev.params.sector_size,
-                "detected sector size differs from the state file — keeping the recorded value"
-            );
-        }
+        validate_resume(cli, &params, &prev.params, detected_sector)?;
     }
 
     // Offsets must sit on the sector grid (the map stays aligned; `O_DIRECT` later
@@ -256,6 +245,58 @@ fn resolve_params(
     require_sector_aligned("seek", params.seek, params.sector_size)?;
 
     Ok(params)
+}
+
+/// Check that a resumed state file describes the same copy as the command
+/// line. The region map's coordinates are relative to `skip`/`seek` on the
+/// recorded target and aligned to the recorded sector grid — reusing it under
+/// different values would silently skip or misplace data (e.g. a state file
+/// from another target marks everything `done`, producing an all-zero "copy"
+/// reported as complete). Conflicts are refused; only the source path may
+/// legitimately differ (a device can be renumbered across reboots), which
+/// [`run`] warns about separately.
+fn validate_resume(
+    cli: &Cli,
+    params: &RunParams,
+    prev: &RunParams,
+    detected_sector: u64,
+) -> Result<()> {
+    if prev.target != params.target {
+        return Err(Error::StateConflict(format!(
+            "the state file records target '{}' but the current target is '{}'; \
+             use the recorded target or a different (or no) state file",
+            prev.target.display(),
+            params.target.display()
+        )));
+    }
+    if let Some(cli_sector) = cli.sector_size {
+        if cli_sector != prev.sector_size {
+            return Err(Error::StateConflict(format!(
+                "--sector-size {} conflicts with the resumed state's sector size {} \
+                 (the region map is aligned to the latter; edit or remove the state file \
+                 to change it)",
+                cli_sector, prev.sector_size
+            )));
+        }
+    } else if detected_sector != prev.sector_size {
+        warn!(
+            detected = detected_sector,
+            recorded = prev.sector_size,
+            "detected sector size differs from the state file — keeping the recorded value"
+        );
+    }
+    for (label, cli_value, recorded) in [("skip", cli.skip, prev.skip), ("seek", cli.seek, prev.seek)]
+    {
+        if let Some(value) = cli_value {
+            if value != recorded {
+                return Err(Error::StateConflict(format!(
+                    "--{label} {value} conflicts with the resumed state's {label} {recorded} \
+                     (the region map is relative to it; remove the state file to start over)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Assemble the run [`Summary`] from the final copy state.
