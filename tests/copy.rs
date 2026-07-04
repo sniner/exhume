@@ -458,6 +458,41 @@ status = "untried"
 }
 
 #[test]
+fn sticky_skip_unchanged_can_be_switched_off_on_resume() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(16 * 1024)).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--skip-unchanged")
+        .assert()
+        .success();
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(s.contains("skip_unchanged = true"), "state was:\n{s}");
+
+    // A bare re-run keeps the recorded mode (sticky) ...
+    exhume().arg(&src).arg(&dst).arg(&state).assert().success();
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(s.contains("skip_unchanged = true"), "state was:\n{s}");
+
+    // ... and =false switches it off without editing the state file.
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--skip-unchanged=false")
+        .assert()
+        .success();
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(s.contains("skip_unchanged = false"), "state was:\n{s}");
+}
+
+#[test]
 fn direct_refuses_a_non_power_of_two_sector_size() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

@@ -55,14 +55,18 @@ pub struct Cli {
     pub seek: Option<u64>,
 
     /// Only write blocks that differ from the target (reads the target to
-    /// compare). For refreshing an existing image/clone — not first imaging
-    #[arg(long)]
-    pub skip_unchanged: bool,
+    /// compare). For refreshing an existing image/clone — not first imaging.
+    /// Sticky across resumes; =false switches it off again
+    #[arg(long, num_args = 0..=1, default_missing_value = "true",
+          require_equals = true, action = clap::ArgAction::Set)]
+    pub skip_unchanged: Option<bool>,
 
     /// Don't write all-zero source blocks, keeping the target sparse. Assumes a
-    /// fresh/zeroed target; use --skip-unchanged to refresh an existing target
-    #[arg(long)]
-    pub skip_zeros: bool,
+    /// fresh/zeroed target; use --skip-unchanged to refresh an existing target.
+    /// Sticky across resumes; =false switches it off again
+    #[arg(long, num_args = 0..=1, default_missing_value = "true",
+          require_equals = true, action = clap::ArgAction::Set)]
+    pub skip_zeros: Option<bool>,
 
     /// Re-read regions marked bad in a previous run and recover what is now
     /// readable (one pass; re-run for more). Reads at sector granularity

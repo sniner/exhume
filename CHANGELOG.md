@@ -4,6 +4,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+
+- **`--skip-unchanged` / `--skip-zeros` take an optional value** — the modes are sticky across
+  resumes, and `--skip-unchanged=false` / `--skip-zeros=false` now switch them off again
+  without editing the state file
+
 ### Changed
 
 - **Device targets keep their auto-named state file in the current directory** (`./sdb.state`

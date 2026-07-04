@@ -59,7 +59,8 @@ Options:
   existing image or clone — saves writes on SSDs/flash and keeps CoW/snapshot
   deltas small. Not useful for first-time imaging (every block differs, so you
   only pay for the extra target reads). The summary then reports bytes scanned
-  vs bytes actually written.
+  vs bytes actually written. Sticky across resumes; `--skip-unchanged=false`
+  switches it off again.
 - `--skip-zeros` — don't write all-zero source blocks, keeping the target
   sparse (like `dd conv=sparse`). No target read needed. **Caveat:** this assumes
   the target reads as zero where writes are skipped — true for a fresh/sparse
@@ -68,6 +69,7 @@ Options:
   to refresh an existing target correctly. exhume warns when `--skip-zeros` is
   used on an occupied target. A regular-file target is always extended to the full
   size at the end (as a sparse hole) even if the trailing blocks were skipped.
+  Sticky across resumes; `--skip-zeros=false` switches it off again.
 - `--retry` — re-read regions marked `bad` in a previous run (resume) and
   recover what is now readable, at sector granularity. One pass per invocation;
   re-run for more.

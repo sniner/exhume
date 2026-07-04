@@ -80,11 +80,15 @@ impl RunParams {
             skip: cli.skip.or_else(|| prior.map(|p| p.skip)).unwrap_or(0),
             seek: cli.seek.or_else(|| prior.map(|p| p.seek)).unwrap_or(0),
             length: cli.length.or_else(|| prior.map(|p| p.length)).unwrap_or(0),
-            // Sticky: once a run is recorded as skip-unchanged, resumes keep it
-            // unless explicitly... well, the flag can only turn it on. To turn
-            // it off again, edit or remove the state file.
-            skip_unchanged: cli.skip_unchanged || prior.is_some_and(|p| p.skip_unchanged),
-            skip_zeros: cli.skip_zeros || prior.is_some_and(|p| p.skip_zeros),
+            // Sticky: once a run is recorded as skip-unchanged, resumes keep
+            // it — unless the flag says otherwise explicitly, in either
+            // direction (`--skip-unchanged=false` switches it off again).
+            skip_unchanged: cli
+                .skip_unchanged
+                .unwrap_or_else(|| prior.is_some_and(|p| p.skip_unchanged)),
+            skip_zeros: cli
+                .skip_zeros
+                .unwrap_or_else(|| prior.is_some_and(|p| p.skip_zeros)),
         }
     }
 }
