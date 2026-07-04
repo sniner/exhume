@@ -2,10 +2,17 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-04
+
+Includes the changes of the unpublished 0.1.1.
 
 ### Added
 
+- **Preflight safety checks** — exhume now refuses, before writing anything: a target device
+  that is mounted (itself, a partition, or a stacked LVM/dm-crypt/MD device on it, including
+  active swap) unless the new `--allow-mounted` is passed; a source and target that are the
+  same file (also via symlink/hardlink aliases); and a block-device target too small to hold
+  the copy. A mounted *source* warns that the image may be inconsistent
 - **`--export-map <PATH>`** — writes the final region map as a GNU ddrescue mapfile (`+` done,
   `-` bad, `?` untried; positions are absolute source offsets), so an unfinished rescue can be
   handed over to ddrescue exactly where exhume left off, skipping everything already copied
@@ -15,47 +22,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ### Changed
 
+- **Streams are rejected up front** — a pipe (FIFO) or socket source now fails immediately with
+  a clear message; exhume reads by offset, so streams never actually worked (they died mid-run
+  with "Illegal seek") and staying out of the streaming business is deliberate — use `cat` or
+  `dd` for those
+- **Ctrl-C** — the first interrupt now announces on stderr that exhume is finishing the current
+  block and saving state; a second Ctrl-C (or SIGTERM) aborts immediately — useful when a read
+  hangs on failing hardware
 - **Device targets keep their auto-named state file in the current directory** (`./sdb.state`
   for `/dev/sdb`) instead of deriving `/dev/sdb.state` on devtmpfs, which is often not writable
   and never survives a reboot — exactly when an interrupted restore needs the state to resume.
   An explicitly named state file is unaffected
 
 ### Fixed
-
-- **Read errors are classified** — only genuine media errors (`EIO`, `EREMOTEIO`, `EBADMSG`)
-  mark sectors as `bad`; anything else (an `O_DIRECT` alignment problem, a vanished device, …)
-  now aborts the run instead of silently sweeping the rest of the source into `bad`
-- **`--direct`** refuses a non-power-of-two `--sector-size` up front, instead of failing every
-  read with `EINVAL`
-- **State is checkpointed on fatal errors** — a run that dies on a write error (or any other
-  fatal condition) now flushes the state file first, so the progress since the last periodic
-  checkpoint survives
-
-## [0.1.1] - 2026-07-04
-
-### Added
-
-- **Preflight safety checks** — exhume now refuses, before writing anything: a target device
-  that is mounted (itself, a partition, or a stacked LVM/dm-crypt/MD device on it, including
-  active swap) unless the new `--allow-mounted` is passed; a source and target that are the
-  same file (also via symlink/hardlink aliases); and a block-device target too small to hold
-  the copy. A mounted *source* warns that the image may be inconsistent
-
-### Changed
-
-- **Streams are rejected up front** — a pipe (FIFO) or socket source now fails immediately with
-  a clear message; exhume reads by offset, so streams never actually worked (they died mid-run
-  with "Illegal seek") and staying out of the streaming business is deliberate — use `cat` or
-  `dd` for those
-
-- **Ctrl-C** — the first interrupt now announces on stderr that exhume is finishing the current
-  block and saving state; a second Ctrl-C (or SIGTERM) aborts immediately — useful when a read
-  hangs on failing hardware
-
-### Fixed
-
-- **State file** — checkpoints are synced to disk before the atomic rename, so a power loss or
-  kernel panic right after a checkpoint can no longer leave an empty state file behind
 
 - **Resume** — a state file recorded for a different target, or `--skip` / `--seek` /
   `--sector-size` values that conflict with the resumed state, are now refused with a clear
@@ -64,6 +43,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 - **Resume** — the region map is reconciled with the current copy domain: resuming with a larger
   `--length` (or a grown source) now copies the new tail instead of reporting early completion,
   and a smaller `--length` no longer copies past the limit
+- **State file** — checkpoints are synced to disk before the atomic rename, so a power loss or
+  kernel panic right after a checkpoint can no longer leave an empty state file behind
+- **Read errors are classified** — only genuine media errors (`EIO`, `EREMOTEIO`, `EBADMSG`)
+  mark sectors as `bad`; anything else (an `O_DIRECT` alignment problem, a vanished device, …)
+  now aborts the run instead of silently sweeping the rest of the source into `bad`
+- **`--direct`** refuses a non-power-of-two `--sector-size` up front, instead of failing every
+  read with `EINVAL`
+- **State is checkpointed on fatal errors** — a run that dies on a write error (or any other
+  fatal condition) now flushes the state file first, so the progress since the last periodic
+  checkpoint survives
 
 ## [0.1.0] - 2026-06-29
 
