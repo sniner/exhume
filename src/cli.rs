@@ -80,6 +80,12 @@ pub struct Cli {
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub hash_chunk: Option<u64>,
 
+    /// After the copy, read the target back and check it against the hash
+    /// manifest (exit code 3 on mismatch). Re-running the same command on a
+    /// completed state verifies without copying — e.g. months later
+    #[arg(long)]
+    pub verify: bool,
+
     /// Re-read regions marked bad in a previous run and recover what is now
     /// readable (one pass; re-run for more). Reads at sector granularity
     #[arg(long)]

@@ -12,6 +12,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
   recoveries are filled in by reading them back from the target at the end of the run. Hashing
   is on when STATE is named explicitly (`--hash` forces it for an auto-named state,
   `--hash=false` switches it off). The manifest is the basis for `--verify`
+- **`--verify`** — reads the target back and checks it against the hash manifest, reporting
+  the offsets of mismatching chunks; exit code `3` on mismatch. Re-running a completed command
+  with `--verify` copies nothing and just verifies — a bit-rot check for archived images that
+  needs neither the source nor a byte of copying. The `--json` summary carries the result in a
+  `verify` object
 
 ## [0.2.0] - 2026-07-04
 

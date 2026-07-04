@@ -699,6 +699,85 @@ status = "untried"
 }
 
 #[test]
+fn verify_confirms_an_intact_target() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(16 * 1024)).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .arg("--verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verified"));
+}
+
+#[test]
+fn verify_detects_target_corruption() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(16 * 1024)).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .assert()
+        .success();
+
+    // Bit-rot strikes: flip one byte in the third chunk.
+    let mut clone = fs::read(&dst).unwrap();
+    clone[9000] ^= 0xFF;
+    fs::write(&dst, &clone).unwrap();
+
+    // Re-running the completed command with --verify copies nothing and
+    // checks the target against the manifest: exit 3, mismatch at 8192.
+    let output = exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--verify")
+        .arg("--json")
+        .arg("--quiet")
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(report["status"], "completed");
+    assert_eq!(report["verify"]["ok"], false);
+    assert_eq!(report["verify"]["mismatches"], serde_json::json!([8192]));
+}
+
+#[test]
+fn verify_without_a_manifest_is_refused() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    fs::write(&src, pattern(4096)).unwrap();
+
+    // Auto-named state: hashing is off by default, so there is no manifest.
+    exhume()
+        .current_dir(dir.path())
+        .arg(&src)
+        .arg("out.img")
+        .arg("--verify")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs a hash manifest"));
+}
+
+#[test]
 fn export_map_writes_a_ddrescue_mapfile() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

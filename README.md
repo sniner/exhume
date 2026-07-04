@@ -72,6 +72,16 @@ Options:
   used on an occupied target. A regular-file target is always extended to the full
   size at the end (as a sparse hole) even if the trailing blocks were skipped.
   Sticky across resumes; `--skip-zeros=false` switches it off again.
+- `--hash[=BOOL]` — record a BLAKE3 digest per chunk in the state file (the
+  integrity manifest for `--verify`). On by default when `STATE` is named
+  explicitly; `--hash` forces it for an auto-named state, `--hash=false`
+  switches it off.
+- `--hash-chunk <SIZE>` — chunk size of the hash manifest (default `64M`).
+  Must be a multiple of the sector size; the grid is fixed once recorded.
+- `--verify` — after the copy, read the target back and check it against the
+  manifest; mismatching chunk offsets are reported and the exit code is `3`.
+  Re-running a completed command with `--verify` copies nothing and just
+  verifies — e.g. months later, to check an archived image for bit-rot.
 - `--retry` — re-read regions marked `bad` in a previous run (resume) and
   recover what is now readable, at sector granularity. One pass per invocation;
   re-run for more.
@@ -119,6 +129,28 @@ exhume refuses the classic `dd` footguns before a single byte is written:
 Sources must be block devices or (character-device / regular) files; pipes and
 sockets are rejected with a pointer to `cat`/`dd` — exhume reads by offset and
 deliberately stays out of the streaming business.
+
+## Integrity
+
+With hashing on (the default whenever you name a `STATE` file), the state file
+doubles as an **integrity manifest**: a BLAKE3 digest per 64 MiB chunk,
+computed on the fly while copying — the hashing itself is effectively free,
+the copy stays I/O-bound. Chunks the copy could not stream in one piece
+(resume seams, `--retry` recoveries) are hashed from the target at the end of
+the run, so any error-free run leaves a complete manifest.
+
+`--verify` reads the target back and compares it against the manifest:
+
+```sh
+exhume /dev/sdb backup.img backup.state           # image + manifest
+exhume /dev/sdb backup.img backup.state --verify  # …and read-back verification
+# months later — no source needed, nothing is copied:
+exhume /dev/sdb backup.img backup.state --verify  # bit-rot check, exit 3 on mismatch
+```
+
+Verification needs only the target and the state file; the source is never
+read. A mismatch names the chunk offsets, so you know *where* an archived
+image went bad, not just *that* it did.
 
 ## Resuming
 

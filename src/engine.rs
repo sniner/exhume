@@ -51,6 +51,31 @@ pub struct Summary {
     /// Whole domain copied with no errors and no interruption.
     pub completed: bool,
     pub interrupted: bool,
+    /// Result of the `--verify` pass, when one ran.
+    pub verify: Option<VerifyOutcome>,
+}
+
+/// Outcome of a `--verify` pass: the target read back against the manifest.
+#[derive(Debug, Clone)]
+pub struct VerifyOutcome {
+    /// Chunks checked against a recorded digest.
+    pub chunks_checked: u64,
+    /// Bytes read back and verified.
+    pub bytes_verified: u64,
+    /// Chunks in the grid without a digest (bad regions, incomplete manifest).
+    pub chunks_unhashed: u64,
+    /// Domain offsets of chunks whose content no longer matches the manifest.
+    pub mismatches: Vec<u64>,
+    /// The pass was interrupted before checking everything.
+    pub interrupted: bool,
+}
+
+impl VerifyOutcome {
+    /// Whether everything checked matched (an interrupted pass is not ok).
+    #[must_use]
+    pub fn ok(&self) -> bool {
+        self.mismatches.is_empty() && !self.interrupted
+    }
 }
 
 /// Run a copy as described by the command line, resuming from a state file if
@@ -187,12 +212,36 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     // Persist the final state regardless of how the loop ended.
     copier.flush()?;
-    let (map, bytes_written, _hasher) = copier.into_parts();
+    let (map, bytes_written, hasher) = copier.into_parts();
     reporter.finish();
 
     // Materialise a sparse tail: ensure a regular-file target spans the whole
     // processed domain even if trailing blocks were skipped (zero or unchanged).
     ensure_len(&dst, params.seek + map.covered_end())?;
+
+    // Read the target back against the manifest.
+    let verify = if cli.verify && !interrupted {
+        let Some(hasher) = &hasher else {
+            return Err(Error::Refused(
+                "--verify needs a hash manifest, but hashing is off — name the state \
+                 file explicitly or pass --hash"
+                    .to_string(),
+            ));
+        };
+        Some(verify_target(
+            &dst,
+            params.seek,
+            domain,
+            transfer,
+            hasher,
+            cli.quiet,
+        )?)
+    } else {
+        if cli.verify {
+            warn!("skipping --verify: the copy was interrupted — resume first");
+        }
+        None
+    };
 
     // Handover to the heavy machinery: the final map as a ddrescue mapfile.
     if let Some(map_path) = &cli.export_map {
@@ -208,9 +257,113 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         &map,
         bytes_written,
         interrupted,
+        verify,
     );
     discard_auto_state(cli.state.is_some(), &summary);
     Ok(summary)
+}
+
+/// Read the target back chunk by chunk and compare each digest against the
+/// manifest. Chunks without a digest are counted but cannot be checked. A
+/// short read (truncated target) counts as a mismatch.
+fn verify_target(
+    dst: &File,
+    seek: u64,
+    domain: u64,
+    transfer: u64,
+    hasher: &ChunkHasher,
+    quiet: bool,
+) -> Result<VerifyOutcome> {
+    let chunk_size = hasher.chunk_size();
+    let grid = if domain > 0 {
+        chunk_count(domain, chunk_size)
+    } else {
+        hasher.chunks().len() as u64
+    };
+
+    let bytes_total: u64 = (0..grid)
+        .filter(|&i| hasher.get(i).is_some())
+        .map(|i| chunk_len(i, chunk_size, domain))
+        .sum();
+    let reporter = Reporter::new(bytes_total, 0, quiet);
+
+    let mut outcome = VerifyOutcome {
+        chunks_checked: 0,
+        bytes_verified: 0,
+        chunks_unhashed: 0,
+        mismatches: Vec::new(),
+        interrupted: false,
+    };
+    let mut buf = vec![0u8; usize::try_from(transfer).expect("transfer fits in usize")];
+
+    for index in 0..grid {
+        if interrupted() {
+            outcome.interrupted = true;
+            break;
+        }
+        let Some(expected) = hasher.get(index) else {
+            outcome.chunks_unhashed += 1;
+            continue;
+        };
+        let start = index * chunk_size;
+        let len = chunk_len(index, chunk_size, domain);
+        match digest_target_range(dst, seek + start, len, &mut buf, &reporter)? {
+            Some(digest) if digest == expected => {}
+            _ => {
+                warn!(
+                    offset = start,
+                    "verify mismatch — chunk differs from the manifest"
+                );
+                outcome.mismatches.push(start);
+            }
+        }
+        outcome.chunks_checked += 1;
+        outcome.bytes_verified += len;
+    }
+    reporter.finish();
+    Ok(outcome)
+}
+
+/// The expected length of chunk `index`: `chunk_size`, clipped by the domain
+/// tail (an unknown domain expects full chunks; its tail sorts itself out via
+/// the short-read path).
+fn chunk_len(index: u64, chunk_size: u64, domain: u64) -> u64 {
+    let start = index * chunk_size;
+    if domain > 0 {
+        chunk_size.min(domain - start)
+    } else {
+        chunk_size
+    }
+}
+
+/// Digest `len` bytes of the target at `offset`, in `buf`-sized reads. `None`
+/// on a short read (truncated target).
+fn digest_target_range(
+    dst: &File,
+    offset: u64,
+    len: u64,
+    buf: &mut [u8],
+    reporter: &Reporter,
+) -> Result<Option<String>> {
+    let mut digester = Digester::new();
+    let mut pos = 0u64;
+    while pos < len {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "bounded by the buffer length, which fits in usize"
+        )]
+        let want = (buf.len() as u64).min(len - pos) as usize;
+        let n = dst
+            .read_at(&mut buf[..want], offset + pos)
+            .map_err(|e| Error::io(format!("reading target back at offset {}", offset + pos), e))?;
+        if n == 0 {
+            return Ok(None);
+        }
+        digester.update(&buf[..n]);
+        reporter.inc(n as u64);
+        pos += n as u64;
+    }
+    Ok(Some(digester.finish()))
 }
 
 /// Decide whether this run hashes, and build the chunk hasher. Hashing is on
@@ -416,6 +569,7 @@ fn validate_resume(
 }
 
 /// Assemble the run [`Summary`] from the final copy state.
+#[allow(clippy::too_many_arguments)]
 fn summarize(
     params: RunParams,
     target: PathBuf,
@@ -424,6 +578,7 @@ fn summarize(
     map: &RegionMap,
     bytes_written: u64,
     interrupted: bool,
+    verify: Option<VerifyOutcome>,
 ) -> Summary {
     let bad_regions = map
         .regions()
@@ -445,6 +600,7 @@ fn summarize(
         skip_zeros: params.skip_zeros,
         completed: !interrupted && untried == 0 && bad_regions == 0,
         interrupted,
+        verify,
     }
 }
 

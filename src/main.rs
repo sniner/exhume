@@ -50,6 +50,14 @@ fn init_tracing(verbose: u8) {
 
 /// Render the run outcome to stdout (the program's intentional output).
 fn print_summary(s: &Summary) {
+    print_copy_summary(s);
+    if let Some(v) = &s.verify {
+        print_verify_summary(v);
+    }
+}
+
+/// The copy half of the summary.
+fn print_copy_summary(s: &Summary) {
     if s.interrupted {
         println!(
             "Interrupted — {} copied so far. Resume with the same command (state: {}).",
@@ -82,6 +90,37 @@ fn print_summary(s: &Summary) {
             HumanBytes(s.bad_bytes),
             s.bad_regions,
             s.state_path.display()
+        );
+    }
+}
+
+/// The verify half of the summary, when a `--verify` pass ran.
+fn print_verify_summary(v: &exhume::engine::VerifyOutcome) {
+    let unhashed = if v.chunks_unhashed > 0 {
+        format!(
+            " ({} chunk(s) have no digest and were skipped)",
+            v.chunks_unhashed
+        )
+    } else {
+        String::new()
+    };
+    if v.interrupted {
+        println!("Verify interrupted — re-run with --verify to check again.");
+    } else if v.mismatches.is_empty() {
+        println!(
+            "Verified — {} in {} chunk(s) match the manifest.{}",
+            HumanBytes(v.bytes_verified),
+            v.chunks_checked,
+            unhashed
+        );
+    } else {
+        println!(
+            "Verify FAILED — {} of {} chunk(s) differ from the manifest \
+             (first at offset {}).{}",
+            v.mismatches.len(),
+            v.chunks_checked,
+            v.mismatches[0],
+            unhashed
         );
     }
 }
@@ -119,6 +158,21 @@ struct JsonReport<'a> {
     skip_zeros: bool,
     completed: bool,
     interrupted: bool,
+    /// Present when a `--verify` pass ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<JsonVerify>,
+}
+
+/// Machine-readable view of a verify pass.
+#[derive(serde::Serialize)]
+struct JsonVerify {
+    ok: bool,
+    chunks_checked: u64,
+    chunks_unhashed: u64,
+    bytes_verified: u64,
+    /// Domain offsets of mismatching chunks.
+    mismatches: Vec<u64>,
+    interrupted: bool,
 }
 
 /// Render the run outcome as a single JSON object on stdout.
@@ -144,6 +198,14 @@ fn print_json(s: &Summary) {
         skip_zeros: s.skip_zeros,
         completed: s.completed,
         interrupted: s.interrupted,
+        verify: s.verify.as_ref().map(|v| JsonVerify {
+            ok: v.ok(),
+            chunks_checked: v.chunks_checked,
+            chunks_unhashed: v.chunks_unhashed,
+            bytes_verified: v.bytes_verified,
+            mismatches: v.mismatches.clone(),
+            interrupted: v.interrupted,
+        }),
     };
     // Serialisation of this fixed struct cannot fail; fall back rather than panic.
     match serde_json::to_string_pretty(&report) {
@@ -152,13 +214,17 @@ fn print_json(s: &Summary) {
     }
 }
 
-/// 0 = fully done, 130 = interrupted, 2 = finished with bad regions.
+/// 0 = fully done, 130 = interrupted (copy or verify), 2 = finished with bad
+/// regions, 3 = the verify pass found mismatches.
 fn exit_code(s: &Summary) -> ExitCode {
-    if s.completed {
-        ExitCode::SUCCESS
-    } else if s.interrupted {
+    let verify = s.verify.as_ref();
+    if s.interrupted || verify.is_some_and(|v| v.interrupted) {
         ExitCode::from(130)
-    } else {
+    } else if !s.completed {
         ExitCode::from(2)
+    } else if verify.is_some_and(|v| !v.mismatches.is_empty()) {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
     }
 }
