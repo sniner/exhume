@@ -116,14 +116,13 @@ fn print_copy_summary(s: &Summary) {
                 HumanBytes(s.bytes_done),
                 s.target.display()
             );
-        } else if s.skip_unchanged || s.skip_zeros {
+        } else if s.skip_zeros {
             println!(
-                "Done — scanned {} from {}, wrote {} to {} ({}).",
+                "Done — scanned {} from {}, wrote {} to {} (zero blocks left sparse).",
                 HumanBytes(s.bytes_done),
                 s.source.display(),
                 HumanBytes(s.bytes_written),
                 s.target.display(),
-                skip_reason(s)
             );
         } else {
             println!(
@@ -176,16 +175,6 @@ fn print_verify_summary(v: &exhume::engine::VerifyOutcome) {
     }
 }
 
-/// Short phrase describing why fewer bytes were written than scanned.
-fn skip_reason(s: &Summary) -> &'static str {
-    match (s.skip_unchanged, s.skip_zeros) {
-        (true, true) => "unchanged and zero blocks skipped",
-        (true, false) => "rest already matched",
-        (false, true) => "zero blocks left sparse",
-        (false, false) => "",
-    }
-}
-
 /// Machine-readable view of a [`Summary`], serialised to stdout under `--json`.
 /// Kept separate from the engine's `Summary` so the wire format stays stable
 /// independent of the internal struct.
@@ -210,7 +199,6 @@ struct JsonReport<'a> {
     refreshed: bool,
     bad_bytes: u64,
     bad_regions: usize,
-    skip_unchanged: bool,
     skip_zeros: bool,
     completed: bool,
     interrupted: bool,
@@ -254,7 +242,6 @@ fn print_json(s: &Summary, compact: bool) {
         refreshed: s.refreshed,
         bad_bytes: s.bad_bytes,
         bad_regions: s.bad_regions,
-        skip_unchanged: s.skip_unchanged,
         skip_zeros: s.skip_zeros,
         completed: s.completed,
         interrupted: s.interrupted,

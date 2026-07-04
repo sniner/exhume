@@ -43,12 +43,6 @@ pub struct RunParams {
     /// Maximum bytes to copy; `0` means "the whole source".
     #[serde(default)]
     pub length: u64,
-    /// Only write blocks that differ from the current target contents.
-    #[serde(default)]
-    pub skip_unchanged: bool,
-    /// Don't write all-zero source blocks, keeping the target sparse.
-    #[serde(default)]
-    pub skip_zeros: bool,
 }
 
 impl RunParams {
@@ -80,15 +74,6 @@ impl RunParams {
             skip: cli.skip.or_else(|| prior.map(|p| p.skip)).unwrap_or(0),
             seek: cli.seek.or_else(|| prior.map(|p| p.seek)).unwrap_or(0),
             length: cli.length.or_else(|| prior.map(|p| p.length)).unwrap_or(0),
-            // Sticky: once a run is recorded as skip-unchanged, resumes keep
-            // it — unless the flag says otherwise explicitly, in either
-            // direction (`--skip-unchanged=false` switches it off again).
-            skip_unchanged: cli
-                .skip_unchanged
-                .unwrap_or_else(|| prior.is_some_and(|p| p.skip_unchanged)),
-            skip_zeros: cli
-                .skip_zeros
-                .unwrap_or_else(|| prior.is_some_and(|p| p.skip_zeros)),
         }
     }
 }

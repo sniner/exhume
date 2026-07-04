@@ -48,48 +48,36 @@ Options:
   granularity. Auto-detected from block devices (falls back to `512`); override
   only if you must. Accepts `512`, `64K`, `1M`, `1.5G`, `4KiB`, `1MB`, …
 - `-t, --transfer-size <SIZE>` — I/O size for healthy reads (default `1M`),
-  aligned down to a whole number of sectors. A smaller value also makes the
-  `--skip-*` modes act at a finer granularity.
+  aligned down to a whole number of sectors. Also the write granularity of a
+  refresh's changed chunks.
 - `-l, --length <SIZE>` — copy at most this many bytes (`0` = whole source)
 - `--skip <SIZE>` — skip this many bytes at the start of the source. Must be a
   whole number of sectors; a misaligned value is rejected with the nearest
   aligned values suggested.
 - `--seek <SIZE>` — seek this many bytes into the target before writing. Must be
   a whole number of sectors, as for `--skip`.
-- `--refresh` — re-scan a *completed* state against its source: chunks whose
-  hash still matches the manifest are skipped entirely (no target read, no
-  write); a changed chunk is written block-wise with target comparison, and
-  its digest is updated. The periodic-image-refresh mode: for a typical
-  nightly refresh the target I/O drops from "read everything" to "touch only
-  what changed". Trusts the manifest — target-side rot in *unchanged* chunks
-  is not repaired (pair with a periodic `--verify`, or use
-  `--refresh --skip-unchanged` to compare against the target instead).
-- `--skip-unchanged` — only write blocks that differ from the current target
-  contents (reads the target block to compare first). Saves writes on
-  SSDs/flash and keeps CoW/snapshot deltas small; combined with `--refresh` it
-  switches the refresh to target comparison. Not useful for first-time imaging
-  (every block differs, so you only pay for the extra target reads). The
-  summary then reports bytes scanned vs bytes actually written. Sticky across
-  resumes; `--skip-unchanged=false` switches it off again.
+- `--refresh` — make the target match the source with minimal I/O: chunks
+  whose hash still matches the manifest are skipped entirely (no target read,
+  no write); everything else is compared against the target block-wise and
+  only differing blocks are written. Works with or without an existing state
+  (without one it compares against the target throughout and records a
+  manifest for next time), and implies consent to write the occupied target —
+  no `--force` needed. Run `--verify` periodically; whatever it finds, the
+  next refresh repairs.
 - `--skip-zeros` — don't write all-zero source blocks, keeping the target
-  sparse (like `dd conv=sparse`). No target read needed. **Caveat:** this assumes
-  the target reads as zero where writes are skipped — true for a fresh/sparse
-  file. On an *existing* target or block device the old bytes simply remain, so a
-  region that became zero in the source is **not** cleared; use `--skip-unchanged`
-  to refresh an existing target correctly. exhume warns when `--skip-zeros` is
-  used on an occupied target. A regular-file target is always extended to the full
-  size at the end (as a sparse hole) even if the trailing blocks were skipped.
-  Sticky across resumes; `--skip-zeros=false` switches it off again.
-- `--hash[=BOOL]` — record a BLAKE3 digest per chunk in the state file (the
-  integrity manifest for `--verify`). On by default when `STATE` is named
-  explicitly; `--hash` forces it for an auto-named state, `--hash=false`
-  switches it off.
+  sparse (like `dd conv=sparse`). No target read needed. For first-time
+  imaging onto a fresh/zeroed target: on an *existing* target the old bytes
+  would simply remain, which is why it conflicts with `--refresh` (exhume
+  also warns on an occupied target). A regular-file target is always extended
+  to the full size at the end (as a sparse hole) even if the trailing blocks
+  were skipped.
 - `--hash-chunk <SIZE>` — chunk size of the hash manifest (default `64M`).
   Must be a multiple of the sector size; the grid is fixed once recorded.
 - `--verify` — after the copy, read the target back and check it against the
-  manifest; mismatching chunk offsets are reported and the exit code is `3`.
-  Re-running a completed command with `--verify` copies nothing and just
-  verifies — e.g. months later, to check an archived image for bit-rot.
+  manifest; mismatching chunk offsets are reported and recorded, and the exit
+  code is `3`. Re-running a completed command with `--verify` copies nothing
+  and just verifies — e.g. months later, to check an archived image for
+  bit-rot. Also works one-shot (`exhume src dst --verify`).
 - `--retry` — re-read regions marked `bad` in a previous run (resume) and
   recover what is now readable, at sector granularity. One pass per invocation;
   re-run for more.
@@ -130,8 +118,9 @@ Options:
 exhume refuses the classic `dd` footguns before a single byte is written:
 
 - Writing to an existing block device or a non-empty file requires `--force`.
-  The one exception is a **resume**: if a matching state file already exists,
-  exhume treats that as your intent to continue and proceeds without `--force`.
+  Two exceptions express the same informed intent: a **resume** (a matching
+  state file already exists) and a **refresh** (`--refresh` says "make this
+  target match this source"). Both proceed without `--force`.
 - A **mounted target** device — itself, one of its partitions, or a stacked
   device on it (LVM, dm-crypt, MD, active swap) — is refused even with
   `--force`; only the explicit `--allow-mounted` overrides it. A mounted
@@ -149,12 +138,12 @@ deliberately stays out of the streaming business.
 
 ## Integrity
 
-With hashing on (the default whenever you name a `STATE` file), the state file
-doubles as an **integrity manifest**: a BLAKE3 digest per 64 MiB chunk,
-computed on the fly while copying — the hashing itself is effectively free,
-the copy stays I/O-bound. Chunks the copy could not stream in one piece
-(resume seams, `--retry` recoveries) are hashed from the target at the end of
-the run, so any error-free run leaves a complete manifest.
+Every run records an **integrity manifest** in the state file: a BLAKE3
+digest per 64 MiB chunk, computed on the fly while copying — the hashing
+itself is effectively free, the copy stays I/O-bound. Chunks the copy could
+not stream in one piece (resume seams, `--retry` recoveries) are hashed from
+the target at the end of the run, so any error-free run leaves a complete
+manifest.
 
 `--verify` reads the target back and compares it against the manifest:
 
@@ -177,6 +166,12 @@ its cursor when you re-run with `--verify`. A completed pass records its
 result and timestamp — `exhume --status run.state` shows it as a "last
 verified" line. Any write to the target (a resumed copy, a retry recovery)
 drops the recorded result, since it no longer describes the target.
+
+Refresh and verify close a loop: **`--refresh` trusts the manifest** (that is
+where its speed comes from), so target-side rot in chunks whose *source*
+never changed is invisible to it — but a periodic `--verify` records exactly
+those chunks, and the **next `--refresh` rewrites them**. Verify finds,
+refresh repairs.
 
 ## Resuming
 
@@ -231,17 +226,19 @@ clutter behind. A state file you name
 explicitly is always kept, and an auto-named one is also kept if the run is
 interrupted or any blocks were unreadable, so you can resume or inspect it. Note
 that once a clean auto-run has removed its state, re-running the same command
-sees an occupied target with no resume consent and will ask for `--force`.
+sees an occupied target with no resume consent and will ask for `--force`
+(or use `--refresh`, which carries its own consent).
 
 ## Status
 
 Early days. The tool does block-wise copy with progress, a human-readable state
 file, resume, sector-aware read-error handling (a failed transfer block is
-isolated down to the dead sectors), the `--skip-unchanged` / `--skip-zeros`
-write-reduction modes, a `--retry` pass for `bad` regions, a `--direct`
-(`O_DIRECT`) mode so retries bypass the page cache, a `--json` summary for
-scripting, the preflight safety checks described above, and a `--export-map`
-handover to GNU ddrescue.
+isolated down to the dead sectors), an always-on integrity manifest with
+`--refresh` (manifest-based image refreshing) and resumable `--verify`
+closing the rot-repair loop, a `--retry` pass for `bad` regions, a `--direct`
+(`O_DIRECT`) mode so retries bypass the page cache, `--json` /
+`--json-progress` for scripting, the preflight safety checks described above,
+and a `--export-map` handover to GNU ddrescue.
 
 ## License
 

@@ -166,11 +166,10 @@ fn rejects_a_misaligned_offset_with_a_helpful_hint() {
 }
 
 #[test]
-fn skip_unchanged_writes_only_changed_blocks() {
+fn stateless_refresh_writes_only_changed_blocks() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
     let dst = dir.path().join("out.img");
-    let state = dir.path().join("run.state");
     let data = pattern(16 * 1024);
     fs::write(&src, &data).unwrap();
     // Target identical to the source except for one clobbered 4 KiB block.
@@ -178,23 +177,28 @@ fn skip_unchanged_writes_only_changed_blocks() {
     clone[8192..12288].fill(0);
     fs::write(&dst, &clone).unwrap();
 
-    exhume()
+    // --refresh without a state: consent to write the occupied target (no
+    // --force), per-block target comparison, minimal writes.
+    let output = exhume()
         .arg(&src)
         .arg(&dst)
-        .arg(&state)
-        .arg("--skip-unchanged")
-        .arg("--force")
+        .arg(dir.path().join("run.state"))
+        .arg("--refresh")
         .arg("--transfer-size")
         .arg("4K")
+        .arg("--json")
+        .arg("--quiet")
         .assert()
         .success()
-        .stdout(predicate::str::contains("already matched"));
+        .get_output()
+        .stdout
+        .clone();
 
-    // The target now matches the source again ...
+    // The target matches the source again, with exactly one block written.
     assert_eq!(fs::read(&dst).unwrap(), data);
-    // ... but only the single changed 4 KiB block was actually written.
-    let s = fs::read_to_string(&state).unwrap();
-    assert!(s.contains("bytes_written = 4096"), "state was:\n{s}");
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(report["refreshed"], true);
+    assert_eq!(report["bytes_written_this_run"], 4096);
 }
 
 #[test]
@@ -463,38 +467,21 @@ status = "untried"
 }
 
 #[test]
-fn sticky_skip_unchanged_can_be_switched_off_on_resume() {
+fn skip_zeros_conflicts_with_refresh() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
-    let dst = dir.path().join("out.img");
-    let state = dir.path().join("run.state");
-    fs::write(&src, pattern(16 * 1024)).unwrap();
+    fs::write(&src, pattern(4096)).unwrap();
 
+    // A refresh must overwrite stale data with zeros; --skip-zeros assumes a
+    // zeroed target. clap rejects the combination up front.
     exhume()
         .arg(&src)
-        .arg(&dst)
-        .arg(&state)
-        .arg("--skip-unchanged")
+        .arg(dir.path().join("out.img"))
+        .arg("--refresh")
+        .arg("--skip-zeros")
         .assert()
-        .success();
-    let s = fs::read_to_string(&state).unwrap();
-    assert!(s.contains("skip_unchanged = true"), "state was:\n{s}");
-
-    // A bare re-run keeps the recorded mode (sticky) ...
-    exhume().arg(&src).arg(&dst).arg(&state).assert().success();
-    let s = fs::read_to_string(&state).unwrap();
-    assert!(s.contains("skip_unchanged = true"), "state was:\n{s}");
-
-    // ... and =false switches it off without editing the state file.
-    exhume()
-        .arg(&src)
-        .arg(&dst)
-        .arg(&state)
-        .arg("--skip-unchanged=false")
-        .assert()
-        .success();
-    let s = fs::read_to_string(&state).unwrap();
-    assert!(s.contains("skip_unchanged = false"), "state was:\n{s}");
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]
@@ -607,23 +594,21 @@ fn explicit_state_records_a_hash_manifest() {
 }
 
 #[test]
-fn hash_false_leaves_the_state_without_a_manifest() {
+fn hashing_is_always_on() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
     let dst = dir.path().join("out.img");
     let state = dir.path().join("run.state");
     fs::write(&src, pattern(8 * 1024)).unwrap();
 
-    exhume()
-        .arg(&src)
-        .arg(&dst)
-        .arg(&state)
-        .arg("--hash=false")
-        .assert()
-        .success();
+    exhume().arg(&src).arg(&dst).arg(&state).assert().success();
 
     let s = fs::read_to_string(&state).unwrap();
-    assert!(!s.contains("[hashes]"), "state was:\n{s}");
+    assert!(
+        s.contains("[hashes]"),
+        "state was:
+{s}"
+    );
 }
 
 #[test]
@@ -861,7 +846,78 @@ fn refresh_writes_only_changed_blocks_and_updates_the_digest() {
 }
 
 #[test]
-fn refresh_trusts_the_manifest_over_the_target() {
+fn verify_finds_rot_and_the_next_refresh_repairs_it() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    let data = pattern(16 * 1024);
+    fs::write(&src, &data).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .arg("--transfer-size")
+        .arg("2K")
+        .assert()
+        .success();
+
+    // The target rots, the source does not: a plain refresh trusts the
+    // manifest and skips the chunk ...
+    let mut rotten = fs::read(&dst).unwrap();
+    rotten[5000] ^= 0xFF;
+    fs::write(&dst, &rotten).unwrap();
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--refresh")
+        .assert()
+        .success();
+    assert_eq!(fs::read(&dst).unwrap(), rotten, "refresh alone skips rot");
+
+    // ... --verify finds and records it (chunk 1, offset 4096) ...
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--verify")
+        .assert()
+        .code(3);
+
+    // ... and the next refresh repairs exactly the rotted block.
+    let output = exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--refresh")
+        .arg("--json")
+        .arg("--quiet")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(report["bytes_written_this_run"], 2048);
+    assert_eq!(fs::read(&dst).unwrap(), data);
+
+    // The circle closes: verify is happy again.
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--verify")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verified"));
+}
+
+#[test]
+fn an_unfinished_verify_does_not_trigger_repairs() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
     let dst = dir.path().join("out.img");
@@ -877,56 +933,58 @@ fn refresh_trusts_the_manifest_over_the_target() {
         .arg("4K")
         .assert()
         .success();
-
-    // The target rots, the source does not: a manifest refresh skips the
-    // chunk (documented trade-off) ...
     let mut rotten = fs::read(&dst).unwrap();
     rotten[5000] ^= 0xFF;
     fs::write(&dst, &rotten).unwrap();
 
-    exhume()
-        .arg(&src)
-        .arg(&dst)
-        .arg(&state)
-        .arg("--refresh")
-        .assert()
-        .success();
-    assert_eq!(
-        fs::read(&dst).unwrap(),
-        rotten,
-        "manifest refresh skips rot"
+    // Seed an *interrupted* verify that already recorded the mismatch: its
+    // list is incomplete by definition, so the refresh must not act on it.
+    let mut s = fs::read_to_string(&state).unwrap();
+    s.push_str(
+        "
+[verify]
+cursor = 3
+mismatches = [4096]
+started = \"2026-07-04T10:00:00Z\"
+",
     );
+    fs::write(&state, &s).unwrap();
 
-    // ... while --refresh --skip-unchanged inspects the target and repairs it.
-    exhume()
+    let output = exhume()
         .arg(&src)
         .arg(&dst)
         .arg(&state)
         .arg("--refresh")
-        .arg("--skip-unchanged")
+        .arg("--json")
+        .arg("--quiet")
         .assert()
-        .success();
-    assert_eq!(
-        fs::read(&dst).unwrap(),
-        data,
-        "target comparison repairs rot"
-    );
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(report["bytes_written_this_run"], 0, "no repairs yet");
+    assert_eq!(fs::read(&dst).unwrap(), rotten, "rot untouched");
 }
 
 #[test]
-fn refresh_without_a_state_is_refused() {
+fn refresh_without_a_state_compares_against_the_target() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
-    fs::write(&src, pattern(4096)).unwrap();
+    let dst = dir.path().join("out.img");
+    let data = pattern(8 * 1024);
+    fs::write(&src, &data).unwrap();
+    fs::write(&dst, pattern(4096)).unwrap(); // occupied, different content
 
+    // No state, occupied target, no --force: --refresh is the consent.
     exhume()
         .arg(&src)
-        .arg(dir.path().join("out.img"))
-        .arg(dir.path().join("missing.state"))
+        .arg(&dst)
         .arg("--refresh")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("needs an existing state file"));
+        .success()
+        .stdout(predicate::str::contains("Refreshed"));
+    assert_eq!(fs::read(&dst).unwrap(), data);
 }
 
 #[test]
@@ -937,16 +995,41 @@ fn refresh_bootstraps_a_missing_manifest() {
     let state = dir.path().join("run.state");
     let data = pattern(16 * 1024);
     fs::write(&src, &data).unwrap();
+    fs::write(&dst, &data).unwrap();
 
-    // A pre-manifest state (hashing off), e.g. from an old exhume version.
-    exhume()
-        .arg(&src)
-        .arg(&dst)
-        .arg(&state)
-        .arg("--hash=false")
-        .assert()
-        .success();
-    assert!(!fs::read_to_string(&state).unwrap().contains("[hashes]"));
+    // A pre-manifest state, e.g. written by an old exhume version.
+    let seeded = format!(
+        r#"[meta]
+version = 1
+program = "exhume"
+program_version = "0.0.0"
+created = "2026-06-18T08:00:00Z"
+updated = "2026-06-18T08:00:00Z"
+
+[params]
+source = "{src}"
+target = "{dst}"
+sector_size = 512
+transfer_size = 4096
+skip = 0
+seek = 0
+length = 0
+
+[progress]
+bytes_total = 16384
+bytes_done = 16384
+bytes_written = 16384
+errors = 0
+
+[[regions]]
+start = 0
+length = 16384
+status = "done"
+"#,
+        src = src.display(),
+        dst = dst.display()
+    );
+    fs::write(&state, &seeded).unwrap();
 
     // The refresh falls back to target comparison — and records a manifest.
     exhume()
@@ -963,7 +1046,8 @@ fn refresh_bootstraps_a_missing_manifest() {
     for chunk in data.chunks(4096) {
         assert!(
             s.contains(&exhume::hash::digest(chunk)),
-            "bootstrapped manifest incomplete; state was:\n{s}"
+            "bootstrapped manifest incomplete; state was:
+{s}"
         );
     }
 }
@@ -1103,20 +1187,22 @@ fn a_write_invalidates_the_recorded_verify() {
 }
 
 #[test]
-fn verify_without_a_manifest_is_refused() {
+fn verify_works_one_shot_with_an_auto_state() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
-    fs::write(&src, pattern(4096)).unwrap();
+    fs::write(&src, pattern(8 * 1024)).unwrap();
 
-    // Auto-named state: hashing is off by default, so there is no manifest.
+    // Hashing is always on, so copy-and-check works without naming a state;
+    // the auto-state is still cleaned up afterwards.
     exhume()
         .current_dir(dir.path())
         .arg(&src)
         .arg("out.img")
         .arg("--verify")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("needs a hash manifest"));
+        .success()
+        .stdout(predicate::str::contains("Verified"));
+    assert!(!dir.path().join("out.img.state").exists());
 }
 
 #[test]

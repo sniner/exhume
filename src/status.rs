@@ -32,8 +32,6 @@ pub struct StatusReport {
     pub transfer_size: u64,
     pub skip: u64,
     pub seek: u64,
-    pub skip_unchanged: bool,
-    pub skip_zeros: bool,
     /// Domain size in bytes (`0` = was unknown).
     pub bytes_total: u64,
     pub bytes_done: u64,
@@ -105,8 +103,6 @@ pub fn report(cli: &Cli) -> Result<StatusReport> {
         transfer_size: state.params.transfer_size,
         skip: state.params.skip,
         seek: state.params.seek,
-        skip_unchanged: state.params.skip_unchanged,
-        skip_zeros: state.params.skip_zeros,
         bytes_total,
         bytes_done: map.bytes_with(RegionStatus::Done),
         bytes_untried: map.bytes_with(RegionStatus::Untried),
@@ -154,13 +150,11 @@ pub fn render(r: &StatusReport) -> String {
     );
     let _ = writeln!(
         out,
-        "Grid:     {} sectors, {} transfer{}{}{}{}",
+        "Grid:     {} sectors, {} transfer{}{}",
         HumanBytes(r.sector_size),
         HumanBytes(r.transfer_size),
         offset_phrase("skip", r.skip),
         offset_phrase("seek", r.seek),
-        flag_phrase("skip-unchanged", r.skip_unchanged),
-        flag_phrase("skip-zeros", r.skip_zeros),
     );
     let percent = if r.bytes_total > 0 {
         #[allow(
@@ -251,15 +245,6 @@ fn verify_phrase(v: &VerifyState, hashes: Option<&HashStatus>) -> String {
 fn offset_phrase(label: &str, value: u64) -> String {
     if value > 0 {
         format!(", {label} {}", HumanBytes(value))
-    } else {
-        String::new()
-    }
-}
-
-/// `, skip-unchanged` when set, empty otherwise.
-fn flag_phrase(label: &str, value: bool) -> String {
-    if value {
-        format!(", {label}")
     } else {
         String::new()
     }

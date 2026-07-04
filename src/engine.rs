@@ -55,8 +55,6 @@ pub struct Summary {
     pub refreshed: bool,
     pub bad_bytes: u64,
     pub bad_regions: usize,
-    /// Whether `--skip-unchanged` was active (affects how the summary reads).
-    pub skip_unchanged: bool,
     /// Whether `--skip-zeros` was active (affects how the summary reads).
     pub skip_zeros: bool,
     /// Whole domain copied with no errors and no interruption.
@@ -123,7 +121,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     // --skip-zeros relies on the target reading as zero where writes are elided.
     // On an occupied target that is not guaranteed, so old data may survive.
-    if params.skip_zeros && occupied && !resuming {
+    if cli.skip_zeros && occupied && !resuming {
         warn!(
             target = %target.display(),
             "--skip-zeros leaves zero source blocks unwritten; pre-existing non-zero \
@@ -184,6 +182,22 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     let prior_verify = existing.as_ref().and_then(|s| s.verify.clone());
 
+    // Chunks a *finished* verify pass recorded as mismatching: the refresh
+    // pass takes them off the manifest fast path and rewrites them — verify
+    // finds rot, the next refresh repairs it. (An interrupted pass's list is
+    // incomplete; repairs wait for a finished one.)
+    let repair: std::collections::HashSet<u64> = prior_verify
+        .as_ref()
+        .filter(|v| v.cursor.is_none())
+        .map(|v| v.mismatches.iter().copied().collect())
+        .unwrap_or_default();
+    if cli.refresh && !repair.is_empty() {
+        info!(
+            chunks = repair.len(),
+            "repairing chunks recorded by the last verify"
+        );
+    }
+
     let mut copier = Copier::new(
         read_src,
         &dst,
@@ -194,11 +208,15 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         domain,
         map,
         prior_written,
-        transfer,
-        direct,
+        CopyOptions {
+            transfer,
+            direct,
+            refresh: cli.refresh,
+            skip_zeros: cli.skip_zeros,
+        },
         hasher,
         prior_verify,
-        cli.refresh,
+        repair,
     );
     let interrupted = match copier.drive(cli.retry) {
         Ok(interrupted) => interrupted,
@@ -233,15 +251,8 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     ensure_len(&dst, params.seek + map.covered_end())?;
 
     // Read the target back against the manifest, resuming an interrupted pass
-    // from its cursor.
-    let verify = if cli.verify && !interrupted {
-        let Some(hasher) = &hasher else {
-            return Err(Error::Refused(
-                "--verify needs a hash manifest, but hashing is off — name the state \
-                 file explicitly or pass --hash"
-                    .to_string(),
-            ));
-        };
+    // from its cursor. (Hashing is always on, so the hasher is always there.)
+    let verify = if let (true, Some(hasher)) = (cli.verify && !interrupted, &hasher) {
         let ctx = crate::verify::VerifyCtx {
             dst: &dst,
             seek: params.seek,
@@ -282,6 +293,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
             done_at_start,
         },
         cli.refresh,
+        cli.skip_zeros,
         interrupted,
         verify,
     );
@@ -289,49 +301,44 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     Ok(summary)
 }
 
-/// Preflight and map transformation for `--refresh`: requires an existing
-/// state and a known-size source; a completed map is re-opened (`done` →
-/// `untried`) for the re-scan. A map with untried bytes left is *not* reset —
-/// that is either an interrupted refresh continuing or an incomplete copy
-/// finishing first; both flows are exactly the normal resume. A state without
-/// a manifest still refreshes correctly (per-block target comparison) and
-/// bootstraps the manifest on the way, since hashing is on for explicit
-/// states.
+/// Preflight and map transformation for `--refresh`: needs a known-size
+/// source; a completed map is re-opened (`done` → `untried`) for the re-scan.
+/// A map with untried bytes left is *not* reset — that is either an
+/// interrupted refresh continuing or an incomplete copy finishing first; both
+/// flows are exactly the normal resume. No state (or no manifest) is fine
+/// too: the refresh then compares against the target per block and records a
+/// manifest on the way — the stateless-nightly workflow.
 fn prepare_refresh(map: &mut RegionMap, existing: Option<&StateFile>, domain: u64) -> Result<()> {
-    let Some(state) = existing else {
-        return Err(Error::Refused(
-            "--refresh needs an existing state file — run a full copy with an \
-             explicit STATE first"
-                .to_string(),
-        ));
-    };
     if domain == 0 {
         return Err(Error::Refused(
             "--refresh needs a source with a detectable size".to_string(),
         ));
     }
-    if state.hashes.is_none() {
-        warn!(
-            "state has no hash manifest — refreshing by target comparison; \
-             this run records a manifest for the next refresh"
-        );
+    match existing {
+        None => {
+            info!("refresh without a state — comparing against the target");
+        }
+        Some(state) if state.hashes.is_none() => {
+            warn!(
+                "state has no hash manifest — refreshing by target comparison; \
+                 this run records a manifest for the next refresh"
+            );
+        }
+        Some(_) => {}
     }
     if map.bytes_with(RegionStatus::Untried) == 0 {
         let done = map.bytes_with(RegionStatus::Done);
         map.reset(RegionStatus::Done, RegionStatus::Untried);
         info!(bytes = done, "refresh: re-scanning the completed domain");
-    } else {
+    } else if existing.is_some() {
         info!("refresh: untried bytes remain — continuing where the last run stopped");
     }
     Ok(())
 }
 
-/// Decide whether this run hashes, and build the chunk hasher. Hashing is on
-/// when the state file is named explicitly (it is kept, so the manifest has
-/// somewhere to live) or when a resumed state already carries one; `--hash`
-/// forces it on for an auto-named state, `--hash=false` off. A resumed
-/// manifest fixes the algorithm and chunk grid — conflicts are refused, like
-/// the sector size.
+/// Build the chunk hasher — hashing is always on; the manifest is simply
+/// discarded together with a clean auto-state. A resumed manifest fixes the
+/// algorithm and chunk grid — conflicts are refused, like the sector size.
 fn setup_hashing(
     cli: &Cli,
     existing: Option<&StateFile>,
@@ -339,10 +346,6 @@ fn setup_hashing(
     domain: u64,
 ) -> Result<Option<ChunkHasher>> {
     let prior = existing.and_then(|s| s.hashes.as_ref());
-    let enabled = cli.hash.unwrap_or(cli.state.is_some() || prior.is_some());
-    if !enabled {
-        return Ok(None);
-    }
     if let Some(manifest) = prior {
         if manifest.algorithm != crate::hash::ALGORITHM {
             return Err(Error::StateConflict(format!(
@@ -411,14 +414,14 @@ fn setup_direct(cli: &Cli, params: &RunParams, domain: u64) -> Result<Option<Fil
 
 /// The write-side guards, run before the target is opened: refuse to copy a
 /// file onto itself; an existing, occupied target needs `--force`, unless a
-/// state file is present (which signals an intentional resume); a mounted
-/// target device is refused outright (`--force` does not cover corrupting a
-/// live filesystem). Returns whether the target was occupied, which the
-/// `--skip-zeros` warning needs later.
+/// state file is present or `--refresh` was given (both express the informed
+/// intent to write this target); a mounted target device is refused outright
+/// (`--force` does not cover corrupting a live filesystem). Returns whether
+/// the target was occupied, which the `--skip-zeros` warning needs later.
 fn guard_target(cli: &Cli, target: &Path, resuming: bool) -> Result<bool> {
     crate::safety::ensure_not_same_file(&cli.source, target)?;
     let occupied = target_occupied(target)?;
-    if !resuming && !cli.force && occupied {
+    if !resuming && !cli.force && !cli.refresh && occupied {
         return Err(Error::TargetExists(target.to_path_buf()));
     }
     crate::safety::check_mounted(&cli.source, target, cli.allow_mounted)?;
@@ -528,6 +531,16 @@ fn validate_resume(
     Ok(())
 }
 
+/// Per-invocation copy options threaded from the CLI into the [`Copier`].
+#[derive(Clone, Copy)]
+struct CopyOptions {
+    /// Effective transfer size (sector-aligned).
+    transfer: u64,
+    direct: bool,
+    refresh: bool,
+    skip_zeros: bool,
+}
+
 /// The write-side counters `summarize` folds into the [`Summary`].
 #[derive(Clone, Copy)]
 struct WriteCounters {
@@ -547,6 +560,7 @@ fn summarize(
     map: &RegionMap,
     counters: WriteCounters,
     refreshed: bool,
+    skip_zeros: bool,
     interrupted: bool,
     verify: Option<VerifyOutcome>,
 ) -> Summary {
@@ -572,8 +586,7 @@ fn summarize(
         refreshed,
         bad_bytes: map.bytes_with(RegionStatus::Bad),
         bad_regions,
-        skip_unchanged: params.skip_unchanged,
-        skip_zeros: params.skip_zeros,
+        skip_zeros,
         completed: !interrupted && untried == 0 && bad_regions == 0,
         interrupted,
         verify,
@@ -599,23 +612,28 @@ struct Copier<'a> {
     transfer: u64,
     map: RegionMap,
     /// Bytes actually written to the target (carried across resumes); excludes
-    /// blocks skipped in skip-unchanged mode because they already matched.
+    /// blocks a refresh skipped because they already matched.
     bytes_written: u64,
     /// Read source reads with `O_DIRECT` (bypass the page cache). Requires
     /// sector-aligned offsets and lengths, satisfied by the sector model.
     direct: bool,
+    /// Don't write all-zero blocks (first imaging onto a fresh target).
+    skip_zeros: bool,
     /// Set once the first read error has switched off read-ahead on a buffered
     /// source, so isolation re-reads aren't poisoned beyond the failing page.
     readahead_off: bool,
     buf: AlignedBuf,
-    /// Scratch buffer for the skip-unchanged comparison; empty when disabled.
+    /// Scratch buffer for the refresh target comparison; empty when disabled.
     cmp_buf: Vec<u8>,
-    /// Manifest hasher fed from the source reads; `None` when hashing is off.
+    /// Manifest hasher fed from the source reads.
     hasher: Option<ChunkHasher>,
     /// Refresh mode: re-scan against the manifest; [`Self::write_block`]
-    /// always compares against the target and never takes the skip-zeros
-    /// shortcut.
+    /// always compares against the target.
     refresh: bool,
+    /// Chunk starts a finished verify pass recorded as mismatching: the
+    /// refresh pass rewrites these even when the source hash still matches
+    /// the manifest (verify finds rot, the next refresh repairs it).
+    repair: std::collections::HashSet<u64>,
     /// Bytes whose chunks matched the manifest and were skipped without any
     /// target I/O (refresh only).
     bytes_skipped_by_hash: u64,
@@ -646,14 +664,13 @@ impl<'a> Copier<'a> {
         domain: u64,
         map: RegionMap,
         bytes_written: u64,
-        transfer: u64,
-        direct: bool,
+        opts: CopyOptions,
         hasher: Option<ChunkHasher>,
         prior_verify: Option<VerifyState>,
-        refresh: bool,
+        repair: std::collections::HashSet<u64>,
     ) -> Self {
-        let buf_size = transfer as usize;
-        let cmp_buf = if params.skip_unchanged || refresh {
+        let buf_size = opts.transfer as usize;
+        let cmp_buf = if opts.refresh {
             vec![0u8; buf_size]
         } else {
             Vec::new()
@@ -666,15 +683,17 @@ impl<'a> Copier<'a> {
             state_path,
             created,
             domain,
-            transfer,
+            transfer: opts.transfer,
             map,
             bytes_written,
-            direct,
+            direct: opts.direct,
+            skip_zeros: opts.skip_zeros,
             readahead_off: false,
             buf: AlignedBuf::new(buf_size, params.sector_size as usize),
             cmp_buf,
             hasher,
-            refresh,
+            refresh: opts.refresh,
+            repair,
             bytes_skipped_by_hash: 0,
             bytes_written_this_run: 0,
             prior_verify,
@@ -700,10 +719,7 @@ impl<'a> Copier<'a> {
         if self.domain == 0 {
             return self.run_sequential();
         }
-        // A refresh with a manifest takes the chunk-skipping fast path; with
-        // --skip-unchanged it deliberately re-inspects the target instead and
-        // runs the classic pass (write_block compares in refresh mode anyway).
-        let mut stopped = if self.refresh && !self.params.skip_unchanged && self.hasher.is_some() {
+        let mut stopped = if self.refresh {
             self.process_refresh()?
         } else {
             self.process(RegionStatus::Untried, true)?
@@ -931,9 +947,12 @@ impl<'a> Copier<'a> {
             }
         }
 
-        // Phase 2: manifest match → the whole chunk needs no target I/O.
+        // Phase 2: manifest match → the whole chunk needs no target I/O —
+        // unless a finished verify pass recorded this chunk as rotted on the
+        // target; then the match only proves the *source* is unchanged and
+        // the chunk falls through to the repairing compare-and-write below.
         let digest = crate::hash::digest(&chunk_buf[..len as usize]);
-        if digest == expected {
+        if digest == expected && !self.repair.contains(&start) {
             self.map.mark(start, len, RegionStatus::Done);
             self.reporter.inc(len);
             self.bytes_skipped_by_hash += len;
@@ -1085,17 +1104,15 @@ impl<'a> Copier<'a> {
         Ok(false)
     }
 
-    /// Write `self.buf[..n]` to `dst_off`, unless a skip mode elides it:
-    /// `--skip-zeros` drops all-zero source blocks (no target read), and
-    /// `--skip-unchanged` drops blocks the target already holds. When both are
-    /// active, a zero block is skipped first without consulting the target.
-    /// In refresh mode the target is always compared, and the skip-zeros
-    /// shortcut is disabled — a refresh must overwrite stale non-zero data
-    /// with zeros, not assume a zeroed target.
+    /// Write `self.buf[..n]` to `dst_off`, unless a mode elides it:
+    /// `--skip-zeros` drops all-zero source blocks (no target read), and a
+    /// refresh drops blocks the target already holds. The two never meet —
+    /// clap rejects the combination (a refresh must overwrite stale non-zero
+    /// data with zeros, not assume a zeroed target).
     fn write_block(&mut self, dst_off: u64, n: usize) -> Result<()> {
-        let write = if self.params.skip_zeros && !self.refresh && is_all_zero(&self.buf[..n]) {
+        let write = if self.skip_zeros && is_all_zero(&self.buf[..n]) {
             false
-        } else if self.params.skip_unchanged || self.refresh {
+        } else if self.refresh {
             target_differs(self.dst, dst_off, &self.buf[..n], &mut self.cmp_buf)
         } else {
             true

@@ -241,8 +241,6 @@ mod tests {
             skip: 0,
             seek: 0,
             length: 0,
-            skip_unchanged: false,
-            skip_zeros: false,
         }
     }
 

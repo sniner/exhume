@@ -54,37 +54,23 @@ pub struct Cli {
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub seek: Option<u64>,
 
-    /// Only write blocks that differ from the target (reads the target to
-    /// compare). For refreshing an existing image/clone — not first imaging.
-    /// Sticky across resumes; =false switches it off again
-    #[arg(long, num_args = 0..=1, default_missing_value = "true",
-          require_equals = true, action = clap::ArgAction::Set)]
-    pub skip_unchanged: Option<bool>,
-
-    /// Don't write all-zero source blocks, keeping the target sparse. Assumes a
-    /// fresh/zeroed target; use --skip-unchanged to refresh an existing target.
-    /// Sticky across resumes; =false switches it off again
-    #[arg(long, num_args = 0..=1, default_missing_value = "true",
-          require_equals = true, action = clap::ArgAction::Set)]
-    pub skip_zeros: Option<bool>,
-
-    /// Record per-chunk BLAKE3 digests in the state file (an integrity
-    /// manifest for --verify). On by default when STATE is named explicitly;
-    /// =false switches it off, --hash forces it on for an auto-named state
-    #[arg(long, num_args = 0..=1, default_missing_value = "true",
-          require_equals = true, action = clap::ArgAction::Set)]
-    pub hash: Option<bool>,
+    /// Don't write all-zero source blocks, keeping the target sparse. For
+    /// first-time imaging onto a fresh/zeroed target (use --refresh to update
+    /// an existing one)
+    #[arg(long, conflicts_with = "refresh")]
+    pub skip_zeros: bool,
 
     /// Chunk size of the hash manifest (default 64M). Must be a multiple of
     /// the sector size; fixed once recorded in the state file
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub hash_chunk: Option<u64>,
 
-    /// Re-scan a completed state against its source: chunks whose hash still
-    /// matches the manifest are skipped entirely (no target I/O); changed
-    /// chunks are written block-wise with target comparison. Add
-    /// --skip-unchanged to compare against the target instead (slower, also
-    /// repairs target-side rot)
+    /// Make the target match the source with minimal I/O: chunks whose hash
+    /// still matches the manifest are skipped entirely; everything else is
+    /// compared against the target and only differing blocks are written.
+    /// Works with or without an existing state (and implies consent to write
+    /// the target). Run --verify periodically; whatever it finds, the next
+    /// refresh repairs
     #[arg(long)]
     pub refresh: bool,
 

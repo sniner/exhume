@@ -2,6 +2,36 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+The simplification release: fewer flags, no mode combinatorics, and the
+verify/refresh rot-repair loop. Done deliberately now, at 0.x with no
+installed base.
+
+### Breaking changes
+
+- **`--skip-unchanged` is gone** — use `--refresh`, which now works with or without a state
+  file (without one it compares against the target throughout and records a manifest for next
+  time) and needs no `--force`. The `--refresh --skip-unchanged` combination is gone too: run
+  `--verify` periodically instead — whatever it finds, the next `--refresh` repairs
+- **`--hash` is gone** — hashing is always on; the manifest costs ~1 MB of state per TB and is
+  never the bottleneck. `--hash-chunk` remains
+- **`--skip-zeros`** no longer takes `=true/false` and is no longer sticky: pass it per
+  invocation (it is for first-time imaging onto a fresh target). It now conflicts with
+  `--refresh`
+- **`--json`**: the `skip_unchanged` field is removed from the summary object
+- **State files**: `[params]` no longer records `skip_unchanged` / `skip_zeros`. Older state
+  files still load (the unknown fields are ignored); the recorded modes are simply no longer
+  sticky
+
+### Added
+
+- **The rot-repair loop** — a finished `--verify` pass records the mismatching chunks in the
+  state; the next `--refresh` takes exactly those chunks off the manifest fast path and
+  rewrites their differing blocks. Verify finds rot, refresh repairs it — no extra flags
+- **`--verify` works one-shot** — with hashing always on, `exhume src dst --verify` images and
+  verifies in one go without naming a state file
+
 ## [0.4.0] - 2026-07-04
 
 ### Added
