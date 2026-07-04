@@ -175,6 +175,18 @@ impl RegionMap {
         self.regions.last().map_or(0, Region::end)
     }
 
+    /// Flip every region in `from` to `to` (merging neighbours as usual) —
+    /// the refresh pass uses this to re-open a completed map (`Done` →
+    /// `Untried`) for a re-scan.
+    pub fn reset(&mut self, from: RegionStatus, to: RegionStatus) {
+        for r in &mut self.regions {
+            if r.status == from {
+                r.status = to;
+            }
+        }
+        self.regions = merge_adjacent(std::mem::take(&mut self.regions));
+    }
+
     /// Whether every byte of `[start, end)` currently has `status`. An empty
     /// range is trivially covered.
     #[must_use]
@@ -355,6 +367,28 @@ mod tests {
         assert_eq!(map, before);
         map.reconcile(0); // unknown size: untouched
         assert_eq!(map, before);
+    }
+
+    #[test]
+    fn reset_reopens_done_regions_and_merges() {
+        let mut map = RegionMap::from_total(1000);
+        map.mark(0, 400, RegionStatus::Done);
+        map.mark(400, 100, RegionStatus::Bad);
+        map.mark(500, 500, RegionStatus::Done);
+
+        map.reset(RegionStatus::Done, RegionStatus::Untried);
+        assert_eq!(
+            statuses(&map),
+            vec![
+                (0, 400, RegionStatus::Untried),
+                (400, 100, RegionStatus::Bad),
+                (500, 500, RegionStatus::Untried),
+            ]
+        );
+
+        // With the bad hole gone, the reset merges into one region.
+        map.mark(400, 100, RegionStatus::Untried);
+        assert_eq!(statuses(&map), vec![(0, 1000, RegionStatus::Untried)]);
     }
 
     #[test]

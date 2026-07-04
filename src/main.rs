@@ -92,7 +92,24 @@ fn print_copy_summary(s: &Summary) {
             s.state_path.display()
         );
     } else if s.completed {
-        if s.bytes_done_this_run == 0 && s.bytes_done > 0 {
+        if s.refreshed {
+            let savings = if s.bytes_skipped_by_hash > 0 {
+                format!(
+                    "{} unchanged per manifest",
+                    HumanBytes(s.bytes_skipped_by_hash)
+                )
+            } else {
+                "target comparison".to_string()
+            };
+            println!(
+                "Refreshed — scanned {} from {}, wrote {} to {} ({}).",
+                HumanBytes(s.bytes_done_this_run),
+                s.source.display(),
+                HumanBytes(s.bytes_written_this_run),
+                s.target.display(),
+                savings
+            );
+        } else if s.bytes_done_this_run == 0 && s.bytes_done > 0 {
             // A no-op resume: the state was already complete.
             println!(
                 "Already complete — {} in {}; nothing copied this run.",
@@ -187,6 +204,10 @@ struct JsonReport<'a> {
     bytes_done: u64,
     bytes_done_this_run: u64,
     bytes_written: u64,
+    bytes_written_this_run: u64,
+    /// Bytes skipped without target I/O on a `--refresh` (manifest match).
+    bytes_skipped_by_hash: u64,
+    refreshed: bool,
     bad_bytes: u64,
     bad_regions: usize,
     skip_unchanged: bool,
@@ -228,6 +249,9 @@ fn print_json(s: &Summary, compact: bool) {
         bytes_done: s.bytes_done,
         bytes_done_this_run: s.bytes_done_this_run,
         bytes_written: s.bytes_written,
+        bytes_written_this_run: s.bytes_written_this_run,
+        bytes_skipped_by_hash: s.bytes_skipped_by_hash,
+        refreshed: s.refreshed,
         bad_bytes: s.bad_bytes,
         bad_regions: s.bad_regions,
         skip_unchanged: s.skip_unchanged,

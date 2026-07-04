@@ -4,6 +4,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added
+
+- **`--refresh`** — re-scans a completed state against its source, the mode for periodically
+  refreshed images: chunks whose hash still matches the manifest are skipped without any
+  target I/O; changed chunks are written block-wise with target comparison and their digests
+  updated. The manifest is trusted — target-side rot in unchanged chunks is not repaired
+  (pair with a periodic `--verify`); `--refresh --skip-unchanged` compares against the target
+  instead and repairs rot too. A state without a manifest refreshes by target comparison and
+  records a manifest on the way. The summary reports the new `bytes_skipped_by_hash` and
+  `bytes_written_this_run` (both also in `--json`)
+
 ### Changed
 
 - **`--verify` is resumable and records its result** — verify progress is checkpointed to a new

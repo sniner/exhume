@@ -56,13 +56,21 @@ Options:
   aligned values suggested.
 - `--seek <SIZE>` — seek this many bytes into the target before writing. Must be
   a whole number of sectors, as for `--skip`.
+- `--refresh` — re-scan a *completed* state against its source: chunks whose
+  hash still matches the manifest are skipped entirely (no target read, no
+  write); a changed chunk is written block-wise with target comparison, and
+  its digest is updated. The periodic-image-refresh mode: for a typical
+  nightly refresh the target I/O drops from "read everything" to "touch only
+  what changed". Trusts the manifest — target-side rot in *unchanged* chunks
+  is not repaired (pair with a periodic `--verify`, or use
+  `--refresh --skip-unchanged` to compare against the target instead).
 - `--skip-unchanged` — only write blocks that differ from the current target
-  contents (reads the target block to compare first). For *refreshing* an
-  existing image or clone — saves writes on SSDs/flash and keeps CoW/snapshot
-  deltas small. Not useful for first-time imaging (every block differs, so you
-  only pay for the extra target reads). The summary then reports bytes scanned
-  vs bytes actually written. Sticky across resumes; `--skip-unchanged=false`
-  switches it off again.
+  contents (reads the target block to compare first). Saves writes on
+  SSDs/flash and keeps CoW/snapshot deltas small; combined with `--refresh` it
+  switches the refresh to target comparison. Not useful for first-time imaging
+  (every block differs, so you only pay for the extra target reads). The
+  summary then reports bytes scanned vs bytes actually written. Sticky across
+  resumes; `--skip-unchanged=false` switches it off again.
 - `--skip-zeros` — don't write all-zero source blocks, keeping the target
   sparse (like `dd conv=sparse`). No target read needed. **Caveat:** this assumes
   the target reads as zero where writes are skipped — true for a fresh/sparse
@@ -155,6 +163,8 @@ exhume /dev/sdb backup.img backup.state           # image + manifest
 exhume /dev/sdb backup.img backup.state --verify  # …and read-back verification
 # months later — no source needed, nothing is copied:
 exhume /dev/sdb backup.img backup.state --verify  # bit-rot check, exit 3 on mismatch
+# nightly: re-scan the source, touch only what changed:
+exhume /dev/sdb backup.img backup.state --refresh
 ```
 
 Verification needs only the target and the state file; the source is never

@@ -80,6 +80,14 @@ pub struct Cli {
     #[arg(long, value_name = "SIZE", value_parser = parse_size)]
     pub hash_chunk: Option<u64>,
 
+    /// Re-scan a completed state against its source: chunks whose hash still
+    /// matches the manifest are skipped entirely (no target I/O); changed
+    /// chunks are written block-wise with target comparison. Add
+    /// --skip-unchanged to compare against the target instead (slower, also
+    /// repairs target-side rot)
+    #[arg(long)]
+    pub refresh: bool,
+
     /// After the copy, read the target back and check it against the hash
     /// manifest (exit code 3 on mismatch). Re-running the same command on a
     /// completed state verifies without copying — e.g. months later

@@ -46,6 +46,13 @@ pub struct Summary {
     pub bytes_done_this_run: u64,
     /// Bytes actually written to the target (< `bytes_done` in skip-unchanged mode).
     pub bytes_written: u64,
+    /// Bytes written by *this* run (`bytes_written` accumulates across resumes).
+    pub bytes_written_this_run: u64,
+    /// Bytes skipped without any target I/O because their chunk still matched
+    /// the manifest (`--refresh`).
+    pub bytes_skipped_by_hash: u64,
+    /// Whether this run was a `--refresh` (affects how the summary reads).
+    pub refreshed: bool,
     pub bad_bytes: u64,
     pub bad_regions: usize,
     /// Whether `--skip-unchanged` was active (affects how the summary reads).
@@ -151,6 +158,10 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     // overhang, so neither is silently mishandled.
     map.reconcile(domain);
 
+    if cli.refresh {
+        prepare_refresh(&mut map, existing.as_ref(), domain)?;
+    }
+
     let created = existing.as_ref().map_or_else(Utc::now, |s| s.meta.created);
 
     let processed_start = domain.saturating_sub(map.bytes_with(RegionStatus::Untried));
@@ -187,6 +198,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         direct,
         hasher,
         prior_verify,
+        cli.refresh,
     );
     let interrupted = match copier.drive(cli.retry) {
         Ok(interrupted) => interrupted,
@@ -206,7 +218,14 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     // Persist the final state regardless of how the loop ended.
     copier.flush()?;
-    let (map, bytes_written, hasher, verify_carry) = copier.into_parts();
+    let CopyParts {
+        map,
+        bytes_written,
+        bytes_written_this_run,
+        bytes_skipped_by_hash,
+        hasher,
+        verify_carry,
+    } = copier.into_parts();
     reporter.finish();
 
     // Materialise a sparse tail: ensure a regular-file target spans the whole
@@ -256,13 +275,55 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         state_path,
         domain,
         &map,
-        bytes_written,
-        done_at_start,
+        WriteCounters {
+            bytes_written,
+            bytes_written_this_run,
+            bytes_skipped_by_hash,
+            done_at_start,
+        },
+        cli.refresh,
         interrupted,
         verify,
     );
     discard_auto_state(cli.state.is_some(), &summary);
     Ok(summary)
+}
+
+/// Preflight and map transformation for `--refresh`: requires an existing
+/// state and a known-size source; a completed map is re-opened (`done` →
+/// `untried`) for the re-scan. A map with untried bytes left is *not* reset —
+/// that is either an interrupted refresh continuing or an incomplete copy
+/// finishing first; both flows are exactly the normal resume. A state without
+/// a manifest still refreshes correctly (per-block target comparison) and
+/// bootstraps the manifest on the way, since hashing is on for explicit
+/// states.
+fn prepare_refresh(map: &mut RegionMap, existing: Option<&StateFile>, domain: u64) -> Result<()> {
+    let Some(state) = existing else {
+        return Err(Error::Refused(
+            "--refresh needs an existing state file — run a full copy with an \
+             explicit STATE first"
+                .to_string(),
+        ));
+    };
+    if domain == 0 {
+        return Err(Error::Refused(
+            "--refresh needs a source with a detectable size".to_string(),
+        ));
+    }
+    if state.hashes.is_none() {
+        warn!(
+            "state has no hash manifest — refreshing by target comparison; \
+             this run records a manifest for the next refresh"
+        );
+    }
+    if map.bytes_with(RegionStatus::Untried) == 0 {
+        let done = map.bytes_with(RegionStatus::Done);
+        map.reset(RegionStatus::Done, RegionStatus::Untried);
+        info!(bytes = done, "refresh: re-scanning the completed domain");
+    } else {
+        info!("refresh: untried bytes remain — continuing where the last run stopped");
+    }
+    Ok(())
 }
 
 /// Decide whether this run hashes, and build the chunk hasher. Hashing is on
@@ -467,6 +528,15 @@ fn validate_resume(
     Ok(())
 }
 
+/// The write-side counters `summarize` folds into the [`Summary`].
+#[derive(Clone, Copy)]
+struct WriteCounters {
+    bytes_written: u64,
+    bytes_written_this_run: u64,
+    bytes_skipped_by_hash: u64,
+    done_at_start: u64,
+}
+
 /// Assemble the run [`Summary`] from the final copy state.
 #[allow(clippy::too_many_arguments)]
 fn summarize(
@@ -475,8 +545,8 @@ fn summarize(
     state_path: PathBuf,
     domain: u64,
     map: &RegionMap,
-    bytes_written: u64,
-    done_at_start: u64,
+    counters: WriteCounters,
+    refreshed: bool,
     interrupted: bool,
     verify: Option<VerifyOutcome>,
 ) -> Summary {
@@ -495,8 +565,11 @@ fn summarize(
         bytes_total: domain,
         bytes_done,
         // saturating: a shrunk domain can clip previously-done regions.
-        bytes_done_this_run: bytes_done.saturating_sub(done_at_start),
-        bytes_written,
+        bytes_done_this_run: bytes_done.saturating_sub(counters.done_at_start),
+        bytes_written: counters.bytes_written,
+        bytes_written_this_run: counters.bytes_written_this_run,
+        bytes_skipped_by_hash: counters.bytes_skipped_by_hash,
+        refreshed,
         bad_bytes: map.bytes_with(RegionStatus::Bad),
         bad_regions,
         skip_unchanged: params.skip_unchanged,
@@ -509,6 +582,10 @@ fn summarize(
 
 /// Holds the live state of an in-flight copy so both copy strategies can share
 /// flushing and the skip-unchanged comparison without long argument lists.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent mode/latch flags of the copy loop, not a disguised state machine"
+)]
 struct Copier<'a> {
     src: &'a File,
     dst: &'a File,
@@ -535,6 +612,15 @@ struct Copier<'a> {
     cmp_buf: Vec<u8>,
     /// Manifest hasher fed from the source reads; `None` when hashing is off.
     hasher: Option<ChunkHasher>,
+    /// Refresh mode: re-scan against the manifest; [`Self::write_block`]
+    /// always compares against the target and never takes the skip-zeros
+    /// shortcut.
+    refresh: bool,
+    /// Bytes whose chunks matched the manifest and were skipped without any
+    /// target I/O (refresh only).
+    bytes_skipped_by_hash: u64,
+    /// Bytes written by *this* run (`bytes_written` carries across resumes).
+    bytes_written_this_run: u64,
     /// The `[verify]` section loaded from the resumed state, carried through
     /// as long as the target is untouched.
     prior_verify: Option<VerifyState>,
@@ -564,9 +650,10 @@ impl<'a> Copier<'a> {
         direct: bool,
         hasher: Option<ChunkHasher>,
         prior_verify: Option<VerifyState>,
+        refresh: bool,
     ) -> Self {
         let buf_size = transfer as usize;
-        let cmp_buf = if params.skip_unchanged {
+        let cmp_buf = if params.skip_unchanged || refresh {
             vec![0u8; buf_size]
         } else {
             Vec::new()
@@ -587,6 +674,9 @@ impl<'a> Copier<'a> {
             buf: AlignedBuf::new(buf_size, params.sector_size as usize),
             cmp_buf,
             hasher,
+            refresh,
+            bytes_skipped_by_hash: 0,
+            bytes_written_this_run: 0,
             prior_verify,
             wrote_this_run: false,
             last_flush: Instant::now(),
@@ -610,7 +700,14 @@ impl<'a> Copier<'a> {
         if self.domain == 0 {
             return self.run_sequential();
         }
-        let mut stopped = self.process(RegionStatus::Untried, true)?;
+        // A refresh with a manifest takes the chunk-skipping fast path; with
+        // --skip-unchanged it deliberately re-inspects the target instead and
+        // runs the classic pass (write_block compares in refresh mode anyway).
+        let mut stopped = if self.refresh && !self.params.skip_unchanged && self.hasher.is_some() {
+            self.process_refresh()?
+        } else {
+            self.process(RegionStatus::Untried, true)?
+        };
         if !stopped && retry {
             let bad_before = self.map.bytes_with(RegionStatus::Bad);
             if bad_before > 0 {
@@ -635,12 +732,33 @@ impl<'a> Copier<'a> {
     /// sector (the offset is already sector-aligned), so a short read at the
     /// file/domain tail is normal and is simply capped back to `want`.
     fn read_block(&mut self, src_off: u64, want: u64) -> std::io::Result<usize> {
-        let req = if self.direct {
-            align_up(want, self.params.sector_size).min(self.buf.len() as u64)
+        Self::read_source(
+            self.src,
+            self.direct,
+            self.params.sector_size,
+            &mut self.buf,
+            src_off,
+            want,
+        )
+    }
+
+    /// The raw read: like [`Self::read_block`], but into a caller-provided
+    /// buffer (the refresh pass reads into its chunk buffer). `buf` must hold
+    /// at least the sector-rounded `want` when `direct` is on.
+    fn read_source(
+        src: &File,
+        direct: bool,
+        sector: u64,
+        buf: &mut [u8],
+        src_off: u64,
+        want: u64,
+    ) -> std::io::Result<usize> {
+        let req = if direct {
+            align_up(want, sector).min(buf.len() as u64)
         } else {
             want
         };
-        let n = self.src.read_at(&mut self.buf[..req as usize], src_off)?;
+        let n = src.read_at(&mut buf[..req as usize], src_off)?;
         Ok((n as u64).min(want) as usize)
     }
 
@@ -652,6 +770,82 @@ impl<'a> Copier<'a> {
     /// bytes and passes `false`. Returns `true` if interrupted.
     fn process(&mut self, status: RegionStatus, advance: bool) -> Result<bool> {
         for region in self.map.regions_with(status) {
+            if self.copy_range(region.start, region.end(), advance)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Copy `[start, end)` with transfer-sized reads — the shared inner loop
+    /// of [`Self::process`] and the refresh pass's fallback. Returns `true`
+    /// if interrupted.
+    fn copy_range(&mut self, start: u64, end: u64, advance: bool) -> Result<bool> {
+        let mut pos = start;
+        while pos < end {
+            if interrupted() {
+                self.flush()?;
+                return Ok(true);
+            }
+            let want = self.transfer.min(end - pos);
+            let src_off = self.params.skip + pos;
+            match self.read_block(src_off, want) {
+                Ok(0) => {
+                    warn!(
+                        offset = src_off,
+                        "unexpected end of source before end of region"
+                    );
+                    break;
+                }
+                Ok(n) => {
+                    let dst_off = self.params.seek + pos;
+                    self.write_block(dst_off, n)?;
+                    self.hash_feed(pos, n);
+                    self.map.mark(pos, n as u64, RegionStatus::Done);
+                    if advance {
+                        self.reporter.inc(n as u64);
+                    }
+                    pos += n as u64;
+                }
+                Err(e) if is_media_error(&e) => {
+                    warn!(offset = src_off, len = want, error = %e, "read error — isolating bad sectors");
+                    if self.isolate(pos, want, advance)? {
+                        return Ok(true);
+                    }
+                    pos += want;
+                }
+                // Everything else (EINVAL from O_DIRECT misuse, a vanished
+                // device, …) is not damage at this position — aborting
+                // beats sweeping the rest of the source into `bad`.
+                Err(e) => {
+                    return Err(Error::io(format!("reading at source offset {src_off}"), e));
+                }
+            }
+            if self.last_flush.elapsed() >= FLUSH_INTERVAL {
+                self.flush()?;
+            }
+        }
+        Ok(false)
+    }
+
+    /// The refresh pass: walk the untried regions in manifest-chunk strides.
+    /// A whole chunk whose source hash matches its manifest digest is marked
+    /// done without touching the target at all; a changed chunk is written
+    /// block-wise with target comparison straight from the chunk buffer, and
+    /// its digest is updated. Spans that do not line up with a hashed chunk
+    /// (bad-region holes, missing digests) and chunks that hit read errors
+    /// fall back to [`Self::copy_range`]. Returns `true` if interrupted.
+    fn process_refresh(&mut self) -> Result<bool> {
+        let chunk_size = self
+            .hasher
+            .as_ref()
+            .expect("refresh fast path requires a hasher")
+            .chunk_size();
+        let mut chunk_buf = AlignedBuf::new(
+            usize::try_from(chunk_size).expect("chunk size fits in usize"),
+            self.params.sector_size as usize,
+        );
+        for region in self.map.regions_with(RegionStatus::Untried) {
             let mut pos = region.start;
             let end = region.end();
             while pos < end {
@@ -659,46 +853,116 @@ impl<'a> Copier<'a> {
                     self.flush()?;
                     return Ok(true);
                 }
-                let want = self.transfer.min(end - pos);
-                let src_off = self.params.skip + pos;
-                match self.read_block(src_off, want) {
-                    Ok(0) => {
-                        warn!(
-                            offset = src_off,
-                            "unexpected end of source before end of region"
-                        );
-                        break;
-                    }
-                    Ok(n) => {
-                        let dst_off = self.params.seek + pos;
-                        self.write_block(dst_off, n)?;
-                        self.hash_feed(pos, n);
-                        self.map.mark(pos, n as u64, RegionStatus::Done);
-                        if advance {
-                            self.reporter.inc(n as u64);
+                let index = pos / chunk_size;
+                let chunk_start = index * chunk_size;
+                let chunk_end = (chunk_start + chunk_size).min(self.domain);
+                let span_end = chunk_end.min(end);
+                let whole_chunk = pos == chunk_start && span_end == chunk_end;
+                let digest = self
+                    .hasher
+                    .as_ref()
+                    .and_then(|h| h.get(index))
+                    .map(str::to_string);
+                let fallback = match digest {
+                    Some(expected) if whole_chunk => {
+                        match self.refresh_chunk(
+                            index,
+                            pos,
+                            span_end - pos,
+                            &expected,
+                            &mut chunk_buf,
+                        )? {
+                            ChunkOutcome::Handled => false,
+                            ChunkOutcome::Interrupted => return Ok(true),
+                            ChunkOutcome::ReadError => true,
                         }
-                        pos += n as u64;
                     }
-                    Err(e) if is_media_error(&e) => {
-                        warn!(offset = src_off, len = want, error = %e, "read error — isolating bad sectors");
-                        if self.isolate(pos, want, advance)? {
-                            return Ok(true);
-                        }
-                        pos += want;
-                    }
-                    // Everything else (EINVAL from O_DIRECT misuse, a vanished
-                    // device, …) is not damage at this position — aborting
-                    // beats sweeping the rest of the source into `bad`.
-                    Err(e) => {
-                        return Err(Error::io(format!("reading at source offset {src_off}"), e));
-                    }
+                    _ => true,
+                };
+                if fallback && self.copy_range(pos, span_end, true)? {
+                    return Ok(true);
                 }
+                pos = span_end;
                 if self.last_flush.elapsed() >= FLUSH_INTERVAL {
                     self.flush()?;
                 }
             }
         }
         Ok(false)
+    }
+
+    /// Refresh one whole, hashed chunk `[start, start + len)`: read and hash
+    /// the source bytes into `chunk_buf`; on a manifest match the chunk is
+    /// done without target I/O, otherwise the buffered bytes are compared and
+    /// written per transfer block and the digest is updated. A read error
+    /// reports [`ChunkOutcome::ReadError`] so the caller falls back to the
+    /// isolating classic path (which re-reads the span).
+    fn refresh_chunk(
+        &mut self,
+        index: u64,
+        start: u64,
+        len: u64,
+        expected: &str,
+        chunk_buf: &mut AlignedBuf,
+    ) -> Result<ChunkOutcome> {
+        // Phase 1: stream the source chunk into the buffer.
+        let mut off = 0u64;
+        while off < len {
+            if interrupted() {
+                self.flush()?;
+                return Ok(ChunkOutcome::Interrupted);
+            }
+            let want = self.transfer.min(len - off);
+            let src_off = self.params.skip + start + off;
+            match Self::read_source(
+                self.src,
+                self.direct,
+                self.params.sector_size,
+                &mut chunk_buf[off as usize..],
+                src_off,
+                want,
+            ) {
+                Ok(0) => return Ok(ChunkOutcome::ReadError), // unexpected EOF
+                Ok(n) => off += n as u64,
+                Err(e) if is_media_error(&e) => return Ok(ChunkOutcome::ReadError),
+                Err(e) => {
+                    return Err(Error::io(format!("reading at source offset {src_off}"), e));
+                }
+            }
+        }
+
+        // Phase 2: manifest match → the whole chunk needs no target I/O.
+        let digest = crate::hash::digest(&chunk_buf[..len as usize]);
+        if digest == expected {
+            self.map.mark(start, len, RegionStatus::Done);
+            self.reporter.inc(len);
+            self.bytes_skipped_by_hash += len;
+            return Ok(ChunkOutcome::Handled);
+        }
+
+        // Phase 3: the chunk changed — compare and write per transfer block
+        // from the buffer (target reads only here), then record the new digest.
+        let mut off = 0u64;
+        while off < len {
+            let n = self.transfer.min(len - off) as usize;
+            let block = &chunk_buf[off as usize..off as usize + n];
+            let dst_off = self.params.seek + start + off;
+            if target_differs(self.dst, dst_off, block, &mut self.cmp_buf) {
+                self.dst.write_all_at(block, dst_off).map_err(|e| {
+                    Error::io(format!("writing {n} bytes at target offset {dst_off}"), e)
+                })?;
+                self.bytes_written += n as u64;
+                self.bytes_written_this_run += n as u64;
+                self.wrote_this_run = true;
+            }
+            self.map.mark(start + off, n as u64, RegionStatus::Done);
+            self.reporter.inc(n as u64);
+            off += n as u64;
+        }
+        if let Some(hasher) = &mut self.hasher {
+            hasher.set(index, digest);
+        }
+        Ok(ChunkOutcome::Handled)
     }
 
     /// Re-read a failed transfer block `[start, start + len)` one sector at a
@@ -825,10 +1089,13 @@ impl<'a> Copier<'a> {
     /// `--skip-zeros` drops all-zero source blocks (no target read), and
     /// `--skip-unchanged` drops blocks the target already holds. When both are
     /// active, a zero block is skipped first without consulting the target.
+    /// In refresh mode the target is always compared, and the skip-zeros
+    /// shortcut is disabled — a refresh must overwrite stale non-zero data
+    /// with zeros, not assume a zeroed target.
     fn write_block(&mut self, dst_off: u64, n: usize) -> Result<()> {
-        let write = if self.params.skip_zeros && is_all_zero(&self.buf[..n]) {
+        let write = if self.params.skip_zeros && !self.refresh && is_all_zero(&self.buf[..n]) {
             false
-        } else if self.params.skip_unchanged {
+        } else if self.params.skip_unchanged || self.refresh {
             target_differs(self.dst, dst_off, &self.buf[..n], &mut self.cmp_buf)
         } else {
             true
@@ -840,6 +1107,7 @@ impl<'a> Copier<'a> {
                     Error::io(format!("writing {n} bytes at target offset {dst_off}"), e)
                 })?;
             self.bytes_written += n as u64;
+            self.bytes_written_this_run += n as u64;
             self.wrote_this_run = true;
         }
         Ok(())
@@ -926,13 +1194,39 @@ impl<'a> Copier<'a> {
         Ok(())
     }
 
-    /// Consume the copier, returning the region map, the write counter, the
-    /// manifest hasher, and the surviving `[verify]` section (for the verify
-    /// pass to resume from).
-    fn into_parts(self) -> (RegionMap, u64, Option<ChunkHasher>, Option<VerifyState>) {
+    /// Consume the copier, handing its final state back to the orchestrator.
+    fn into_parts(self) -> CopyParts {
         let verify_carry = self.verify_carry();
-        (self.map, self.bytes_written, self.hasher, verify_carry)
+        CopyParts {
+            map: self.map,
+            bytes_written: self.bytes_written,
+            bytes_written_this_run: self.bytes_written_this_run,
+            bytes_skipped_by_hash: self.bytes_skipped_by_hash,
+            hasher: self.hasher,
+            verify_carry,
+        }
     }
+}
+
+/// How [`Copier::refresh_chunk`] disposed of a chunk.
+enum ChunkOutcome {
+    /// Fully handled — skipped via manifest match, or compared and written.
+    Handled,
+    /// Interrupted mid-chunk; state is flushed.
+    Interrupted,
+    /// A source read failed; the caller re-runs the span through the
+    /// isolating classic path.
+    ReadError,
+}
+
+/// The copier's final state, consumed by the orchestrator after the run.
+struct CopyParts {
+    map: RegionMap,
+    bytes_written: u64,
+    bytes_written_this_run: u64,
+    bytes_skipped_by_hash: u64,
+    hasher: Option<ChunkHasher>,
+    verify_carry: Option<VerifyState>,
 }
 
 /// The persistable `[hashes]` section for a manifest hasher.

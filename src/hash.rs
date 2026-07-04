@@ -133,11 +133,24 @@ impl ChunkHasher {
     }
 
     /// Account for an unreadable range `[offset, offset + len)`: the chunk
-    /// under construction is abandoned; chunks wholly inside the range simply
-    /// never get a hasher.
+    /// under construction is abandoned, and any *recorded* digest of a chunk
+    /// the range touches is cleared — its content no longer matches the
+    /// manifest (this matters on a refresh, where prior digests exist).
     pub fn bad(&mut self, offset: u64, len: u64) {
         self.active = None;
         self.expected = offset + len;
+        if len == 0 {
+            return;
+        }
+        let first = offset / self.chunk_size;
+        let last = (offset + len - 1) / self.chunk_size;
+        for index in first..=last {
+            if let Ok(i) = usize::try_from(index) {
+                if let Some(digest) = self.chunks.get_mut(i) {
+                    digest.clear();
+                }
+            }
+        }
     }
 
     /// Finish an unknown-size domain at end-of-input: the trailing partial
@@ -257,6 +270,19 @@ mod tests {
         assert_eq!(h.chunks()[0], "");
         assert_eq!(h.chunks()[1], "");
         assert_eq!(h.chunks()[2], digest(&bytes[512..768]));
+        assert_eq!(h.chunks()[3], digest(&bytes[768..1024]));
+    }
+
+    #[test]
+    fn a_bad_range_clears_recorded_digests() {
+        let bytes = data(1024);
+        let prior: Vec<String> = bytes.chunks(256).map(digest).collect();
+        let mut h = ChunkHasher::new(256, 1024, prior);
+        // A bad range straddling chunks 1 and 2 invalidates both digests.
+        h.bad(300, 300);
+        assert_eq!(h.chunks()[0], digest(&bytes[0..256]));
+        assert_eq!(h.chunks()[1], "");
+        assert_eq!(h.chunks()[2], "");
         assert_eq!(h.chunks()[3], digest(&bytes[768..1024]));
     }
 
