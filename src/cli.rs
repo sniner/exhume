@@ -68,6 +68,18 @@ pub struct Cli {
           require_equals = true, action = clap::ArgAction::Set)]
     pub skip_zeros: Option<bool>,
 
+    /// Record per-chunk BLAKE3 digests in the state file (an integrity
+    /// manifest for --verify). On by default when STATE is named explicitly;
+    /// =false switches it off, --hash forces it on for an auto-named state
+    #[arg(long, num_args = 0..=1, default_missing_value = "true",
+          require_equals = true, action = clap::ArgAction::Set)]
+    pub hash: Option<bool>,
+
+    /// Chunk size of the hash manifest (default 64M). Must be a multiple of
+    /// the sector size; fixed once recorded in the state file
+    #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+    pub hash_chunk: Option<u64>,
+
     /// Re-read regions marked bad in a previous run and recover what is now
     /// readable (one pass; re-run for more). Reads at sector granularity
     #[arg(long)]

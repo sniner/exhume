@@ -578,6 +578,127 @@ fn defaults_target_to_grave_img() {
 }
 
 #[test]
+fn explicit_state_records_a_hash_manifest() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    let data = pattern(16 * 1024);
+    fs::write(&src, &data).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .assert()
+        .success();
+
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(s.contains("[hashes]"), "state was:\n{s}");
+    assert!(s.contains("algorithm = \"blake3\""), "state was:\n{s}");
+    for chunk in data.chunks(4096) {
+        assert!(
+            s.contains(&exhume::hash::digest(chunk)),
+            "missing digest for a chunk; state was:\n{s}"
+        );
+    }
+}
+
+#[test]
+fn hash_false_leaves_the_state_without_a_manifest() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(8 * 1024)).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash=false")
+        .assert()
+        .success();
+
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(!s.contains("[hashes]"), "state was:\n{s}");
+}
+
+#[test]
+fn resume_fills_manifest_gaps_from_the_target() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    let data = pattern(16 * 1024);
+    fs::write(&src, &data).unwrap();
+    // The earlier (interrupted) run copied the first 6 KiB — mid-chunk with a
+    // 4 KiB grid, so chunk 1 can never be streamed in one piece on resume.
+    fs::write(&dst, &data[..6144]).unwrap();
+
+    let seeded = format!(
+        r#"[meta]
+version = 1
+program = "exhume"
+program_version = "0.0.0"
+created = "2026-06-18T08:00:00Z"
+updated = "2026-06-18T08:00:00Z"
+
+[params]
+source = "{src}"
+target = "{dst}"
+sector_size = 512
+transfer_size = 2048
+skip = 0
+seek = 0
+length = 0
+skip_unchanged = false
+skip_zeros = false
+
+[hashes]
+algorithm = "blake3"
+chunk_size = 4096
+chunks = ["{chunk0}"]
+
+[progress]
+bytes_total = 16384
+bytes_done = 6144
+bytes_written = 6144
+errors = 0
+
+[[regions]]
+start = 0
+length = 6144
+status = "done"
+
+[[regions]]
+start = 6144
+length = 10240
+status = "untried"
+"#,
+        src = src.display(),
+        dst = dst.display(),
+        chunk0 = exhume::hash::digest(&data[..4096]),
+    );
+    fs::write(&state, &seeded).unwrap();
+
+    exhume().arg(&src).arg(&dst).arg(&state).assert().success();
+
+    assert_eq!(fs::read(&dst).unwrap(), data);
+    // All four chunks must end up hashed: 0 from the prior run, 2 and 3
+    // streamed inline on resume, and 1 (the resume seam) via target read-back.
+    let s = fs::read_to_string(&state).unwrap();
+    for chunk in data.chunks(4096) {
+        assert!(
+            s.contains(&exhume::hash::digest(chunk)),
+            "missing digest for a chunk; state was:\n{s}"
+        );
+    }
+}
+
+#[test]
 fn export_map_writes_a_ddrescue_mapfile() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

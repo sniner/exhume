@@ -7,6 +7,7 @@
 //! [meta]            # format version + provenance
 //! [params]          # the full run configuration (see RunParams)
 //! [progress]        # human-facing totals (derivable from regions)
+//! [hashes]          # optional integrity manifest: per-chunk digests
 //! [[regions]]       # the region map: start / length / status
 //! ```
 
@@ -47,12 +48,30 @@ pub struct Progress {
     pub errors: u64,
 }
 
+/// The integrity manifest: one digest per fixed-size chunk of the domain.
+/// Chunks are indexed implicitly by position in `chunks`; an empty string
+/// means "not hashed" (the chunk was never streamed in one piece, e.g. it
+/// contains bad sectors).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hashes {
+    /// Digest algorithm; currently always `"blake3"`.
+    pub algorithm: String,
+    /// Chunk size in bytes; the grid is fixed for the lifetime of the state.
+    pub chunk_size: u64,
+    /// Lowercase hex digests by chunk index; `""` = not hashed.
+    #[serde(default)]
+    pub chunks: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateFile {
     pub meta: Meta,
     pub params: RunParams,
     #[serde(default)]
     pub progress: Progress,
+    /// Optional integrity manifest (`[hashes]`), present when hashing was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hashes: Option<Hashes>,
     #[serde(default)]
     pub regions: Vec<Region>,
 }
@@ -72,6 +91,7 @@ impl StateFile {
         domain: u64,
         created: DateTime<Utc>,
         bytes_written: u64,
+        hashes: Option<Hashes>,
     ) -> Self {
         StateFile {
             meta: Meta {
@@ -82,6 +102,7 @@ impl StateFile {
                 updated: Utc::now(),
             },
             params: params.clone(),
+            hashes,
             progress: Progress {
                 bytes_total: domain,
                 bytes_done: map.bytes_with(RegionStatus::Done),
@@ -203,18 +224,47 @@ mod tests {
         let mut map = RegionMap::from_total(4096);
         map.mark(0, 2048, RegionStatus::Done);
         map.mark(2048, 1024, RegionStatus::Bad);
-        let state = StateFile::build(&sample_params(), &map, 4096, Utc::now(), 2048);
+        let state = StateFile::build(&sample_params(), &map, 4096, Utc::now(), 2048, None);
 
         let text = toml::to_string_pretty(&state).unwrap();
         assert!(text.contains("[meta]"));
         assert!(text.contains("[params]"));
         assert!(text.contains("[[regions]]"));
+        assert!(!text.contains("[hashes]"), "no manifest unless hashing ran");
 
         let parsed: StateFile = toml::from_str(&text).unwrap();
         assert_eq!(parsed.params, sample_params());
         assert_eq!(parsed.progress.bytes_done, 2048);
         assert_eq!(parsed.progress.bytes_written, 2048);
         assert_eq!(parsed.progress.errors, 1);
+        assert_eq!(parsed.hashes, None);
         assert_eq!(parsed.region_map(), map);
+    }
+
+    #[test]
+    fn hashes_round_trip_through_toml() {
+        use super::Hashes;
+
+        let mut map = RegionMap::from_total(4096);
+        map.mark(0, 4096, RegionStatus::Done);
+        let hashes = Hashes {
+            algorithm: "blake3".to_string(),
+            chunk_size: 2048,
+            chunks: vec!["aa11".to_string(), String::new()],
+        };
+        let state = StateFile::build(
+            &sample_params(),
+            &map,
+            4096,
+            Utc::now(),
+            4096,
+            Some(hashes.clone()),
+        );
+
+        let text = toml::to_string_pretty(&state).unwrap();
+        assert!(text.contains("[hashes]"), "state was:\n{text}");
+
+        let parsed: StateFile = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.hashes, Some(hashes));
     }
 }

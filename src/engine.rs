@@ -14,10 +14,11 @@ use tracing::{info, warn};
 
 use crate::cli::Cli;
 use crate::error::{Error, Result};
+use crate::hash::{ChunkHasher, Digester, chunk_count};
 use crate::params::{DEFAULT_SECTOR_SIZE, DEFAULT_TARGET, RunParams, require_sector_aligned};
 use crate::progress::Reporter;
 use crate::region::{RegionMap, RegionStatus};
-use crate::state::StateFile;
+use crate::state::{Hashes, StateFile};
 
 /// How often to flush the state file to disk during a long copy.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
@@ -60,6 +61,10 @@ pub struct Summary {
 /// Returns an error if arguments are invalid, the target needs `--force`, the
 /// source or target cannot be opened, a write fails, or the state file cannot
 /// be read or written.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear orchestration of the copy pipeline; splitting further would only scatter it"
+)]
 pub fn run(cli: &Cli) -> Result<Summary> {
     let target = cli
         .target
@@ -148,6 +153,8 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     let direct = direct_src.is_some();
     let read_src = direct_src.as_ref().unwrap_or(&src);
 
+    let hasher = setup_hashing(cli, existing.as_ref(), params.sector_size, domain)?;
+
     let mut copier = Copier::new(
         read_src,
         &dst,
@@ -160,6 +167,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         prior_written,
         transfer,
         direct,
+        hasher,
     );
     let interrupted = match copier.drive(cli.retry) {
         Ok(interrupted) => interrupted,
@@ -171,9 +179,15 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         }
     };
 
+    // Manifest gaps (resume seams, --retry recoveries) are filled by hashing
+    // the finished chunks back from the target.
+    if !interrupted {
+        copier.fill_hash_gaps()?;
+    }
+
     // Persist the final state regardless of how the loop ended.
     copier.flush()?;
-    let (map, bytes_written) = copier.into_parts();
+    let (map, bytes_written, _hasher) = copier.into_parts();
     reporter.finish();
 
     // Materialise a sparse tail: ensure a regular-file target spans the whole
@@ -197,6 +211,58 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     );
     discard_auto_state(cli.state.is_some(), &summary);
     Ok(summary)
+}
+
+/// Decide whether this run hashes, and build the chunk hasher. Hashing is on
+/// when the state file is named explicitly (it is kept, so the manifest has
+/// somewhere to live) or when a resumed state already carries one; `--hash`
+/// forces it on for an auto-named state, `--hash=false` off. A resumed
+/// manifest fixes the algorithm and chunk grid — conflicts are refused, like
+/// the sector size.
+fn setup_hashing(
+    cli: &Cli,
+    existing: Option<&StateFile>,
+    sector: u64,
+    domain: u64,
+) -> Result<Option<ChunkHasher>> {
+    let prior = existing.and_then(|s| s.hashes.as_ref());
+    let enabled = cli.hash.unwrap_or(cli.state.is_some() || prior.is_some());
+    if !enabled {
+        return Ok(None);
+    }
+    if let Some(manifest) = prior {
+        if manifest.algorithm != crate::hash::ALGORITHM {
+            return Err(Error::StateConflict(format!(
+                "the state file's hash manifest uses '{}'; this exhume only supports '{}' \
+                 (remove the [hashes] section to re-create the manifest)",
+                manifest.algorithm,
+                crate::hash::ALGORITHM
+            )));
+        }
+        if let Some(cli_chunk) = cli.hash_chunk {
+            if cli_chunk != manifest.chunk_size {
+                return Err(Error::StateConflict(format!(
+                    "--hash-chunk {} conflicts with the manifest's chunk size {} (the grid is \
+                     fixed once recorded; remove the [hashes] section to re-grid)",
+                    cli_chunk, manifest.chunk_size
+                )));
+            }
+        }
+    }
+    let chunk_size = prior
+        .map(|manifest| manifest.chunk_size)
+        .or(cli.hash_chunk)
+        .unwrap_or(crate::hash::DEFAULT_CHUNK_SIZE);
+    if chunk_size == 0 || chunk_size % sector != 0 {
+        return Err(Error::InvalidSize(format!(
+            "--hash-chunk {chunk_size} must be a positive multiple of the \
+             {sector}-byte sector size"
+        )));
+    }
+    let chunks = prior
+        .map(|manifest| manifest.chunks.clone())
+        .unwrap_or_default();
+    Ok(Some(ChunkHasher::new(chunk_size, domain, chunks)))
 }
 
 /// Set up the `O_DIRECT` read side (reads only): a separate fd opened with
@@ -408,6 +474,8 @@ struct Copier<'a> {
     buf: AlignedBuf,
     /// Scratch buffer for the skip-unchanged comparison; empty when disabled.
     cmp_buf: Vec<u8>,
+    /// Manifest hasher fed from the source reads; `None` when hashing is off.
+    hasher: Option<ChunkHasher>,
     last_flush: Instant,
 }
 
@@ -429,6 +497,7 @@ impl<'a> Copier<'a> {
         bytes_written: u64,
         transfer: u64,
         direct: bool,
+        hasher: Option<ChunkHasher>,
     ) -> Self {
         let buf_size = transfer as usize;
         let cmp_buf = if params.skip_unchanged {
@@ -451,7 +520,16 @@ impl<'a> Copier<'a> {
             readahead_off: false,
             buf: AlignedBuf::new(buf_size, params.sector_size as usize),
             cmp_buf,
+            hasher,
             last_flush: Instant::now(),
+        }
+    }
+
+    /// Feed the freshly read source bytes at domain offset `pos` (currently in
+    /// `buf[..n]`) into the manifest hasher, if hashing is on.
+    fn hash_feed(&mut self, pos: u64, n: usize) {
+        if let Some(hasher) = &mut self.hasher {
+            hasher.feed(pos, &self.buf[..n]);
         }
     }
 
@@ -526,6 +604,7 @@ impl<'a> Copier<'a> {
                     Ok(n) => {
                         let dst_off = self.params.seek + pos;
                         self.write_block(dst_off, n)?;
+                        self.hash_feed(pos, n);
                         self.map.mark(pos, n as u64, RegionStatus::Done);
                         if advance {
                             self.reporter.inc(n as u64);
@@ -586,6 +665,7 @@ impl<'a> Copier<'a> {
                 Ok(n) => {
                     let dst_off = self.params.seek + pos;
                     self.write_block(dst_off, n)?;
+                    self.hash_feed(pos, n);
                     self.map.mark(pos, n as u64, RegionStatus::Done);
                     if advance {
                         self.reporter.inc(n as u64);
@@ -593,6 +673,9 @@ impl<'a> Copier<'a> {
                     pos += n as u64;
                 }
                 Err(e) if is_media_error(&e) => {
+                    if let Some(hasher) = &mut self.hasher {
+                        hasher.bad(pos, want);
+                    }
                     self.map.mark(pos, want, RegionStatus::Bad);
                     if advance {
                         self.reporter.inc(want);
@@ -653,6 +736,7 @@ impl<'a> Copier<'a> {
             }
             let dst_off = self.params.seek + pos;
             self.write_block(dst_off, n)?;
+            self.hash_feed(pos, n);
             self.map.mark(pos, n as u64, RegionStatus::Done);
             self.reporter.inc(n as u64);
             pos += n as u64;
@@ -660,6 +744,11 @@ impl<'a> Copier<'a> {
             if self.last_flush.elapsed() >= FLUSH_INTERVAL {
                 self.flush()?;
             }
+        }
+        // End-of-input of an unknown-size source: the trailing partial chunk
+        // is complete now.
+        if let Some(hasher) = &mut self.hasher {
+            hasher.finish();
         }
         Ok(false)
     }
@@ -687,6 +776,70 @@ impl<'a> Copier<'a> {
         Ok(())
     }
 
+    /// Fill manifest gaps by hashing fully-`done` chunks back from the target:
+    /// chunks broken by resume seams or recovered out of order via `--retry`
+    /// never streamed past the hasher in one piece, but their bytes are all on
+    /// the target now. Bounded work — a fresh clean run has no gaps at all.
+    fn fill_hash_gaps(&mut self) -> Result<()> {
+        let Some(mut hasher) = self.hasher.take() else {
+            return Ok(());
+        };
+        let chunk_size = hasher.chunk_size();
+        for index in 0..chunk_count(self.domain, chunk_size) {
+            if interrupted() {
+                break;
+            }
+            if hasher.get(index).is_some() {
+                continue;
+            }
+            let start = index * chunk_size;
+            let end = (start + chunk_size).min(self.domain);
+            if !self.map.covers(start, end, RegionStatus::Done) {
+                continue; // still has bad or untried bytes — not hashable
+            }
+            if let Some(digest) = self.hash_target_range(start, end)? {
+                hasher.set(index, digest);
+            }
+        }
+        self.hasher = Some(hasher);
+        Ok(())
+    }
+
+    /// Hash the target bytes for domain range `[start, end)`. `None` on a
+    /// short read (a truncated target is a verify-time problem, not a reason
+    /// to fail the copy).
+    fn hash_target_range(&mut self, start: u64, end: u64) -> Result<Option<String>> {
+        let mut digester = Digester::new();
+        let mut pos = start;
+        while pos < end {
+            let want = self.transfer.min(end - pos) as usize;
+            let n = self
+                .dst
+                .read_at(&mut self.buf[..want], self.params.seek + pos)
+                .map_err(|e| {
+                    Error::io(
+                        format!("reading target back at offset {pos} for hashing"),
+                        e,
+                    )
+                })?;
+            if n == 0 {
+                return Ok(None);
+            }
+            digester.update(&self.buf[..n]);
+            pos += n as u64;
+        }
+        Ok(Some(digester.finish()))
+    }
+
+    /// The current manifest for persisting, if hashing is on.
+    fn manifest(&self) -> Option<Hashes> {
+        self.hasher.as_ref().map(|hasher| Hashes {
+            algorithm: crate::hash::ALGORITHM.to_string(),
+            chunk_size: hasher.chunk_size(),
+            chunks: hasher.chunks().to_vec(),
+        })
+    }
+
     /// Serialise and atomically write the current state, and reset the flush timer.
     fn flush(&mut self) -> Result<()> {
         StateFile::build(
@@ -695,15 +848,17 @@ impl<'a> Copier<'a> {
             self.domain,
             self.created,
             self.bytes_written,
+            self.manifest(),
         )
         .save_atomic(self.state_path)?;
         self.last_flush = Instant::now();
         Ok(())
     }
 
-    /// Consume the copier, returning the region map and the write counter.
-    fn into_parts(self) -> (RegionMap, u64) {
-        (self.map, self.bytes_written)
+    /// Consume the copier, returning the region map, the write counter, and
+    /// the manifest hasher (for the verify pass).
+    fn into_parts(self) -> (RegionMap, u64, Option<ChunkHasher>) {
+        (self.map, self.bytes_written, self.hasher)
     }
 }
 

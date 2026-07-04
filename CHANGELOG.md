@@ -2,6 +2,17 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Added
+
+- **Integrity manifest (`[hashes]`)** — with hashing on, exhume records a BLAKE3 digest per
+  fixed-size chunk (default 64 MiB, `--hash-chunk` to change) in the state file, computed on
+  the fly from the source bytes as they are copied; chunks broken by resume seams or `--retry`
+  recoveries are filled in by reading them back from the target at the end of the run. Hashing
+  is on when STATE is named explicitly (`--hash` forces it for an auto-named state,
+  `--hash=false` switches it off). The manifest is the basis for `--verify`
+
 ## [0.2.0] - 2026-07-04
 
 Includes the changes of the unpublished 0.1.1.

@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod engine;
 pub mod error;
+pub mod hash;
 pub mod mapfile;
 pub mod params;
 pub mod progress;

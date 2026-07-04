@@ -175,6 +175,26 @@ impl RegionMap {
         self.regions.last().map_or(0, Region::end)
     }
 
+    /// Whether every byte of `[start, end)` currently has `status`. An empty
+    /// range is trivially covered.
+    #[must_use]
+    pub fn covers(&self, start: u64, end: u64, status: RegionStatus) -> bool {
+        let mut pos = start;
+        for r in &self.regions {
+            if pos >= end {
+                break;
+            }
+            if r.end() <= pos {
+                continue;
+            }
+            if r.start > pos || r.status != status {
+                return false;
+            }
+            pos = r.end();
+        }
+        pos >= end
+    }
+
     /// Read-only view of the underlying regions.
     #[must_use]
     pub fn regions(&self) -> &[Region] {
@@ -335,6 +355,24 @@ mod tests {
         assert_eq!(map, before);
         map.reconcile(0); // unknown size: untouched
         assert_eq!(map, before);
+    }
+
+    #[test]
+    fn covers_checks_status_over_a_range() {
+        let mut map = RegionMap::from_total(1000);
+        map.mark(0, 500, RegionStatus::Done);
+        map.mark(200, 100, RegionStatus::Bad);
+
+        assert!(map.covers(0, 200, RegionStatus::Done));
+        assert!(map.covers(300, 500, RegionStatus::Done));
+        assert!(!map.covers(0, 500, RegionStatus::Done), "bad hole inside");
+        assert!(!map.covers(400, 600, RegionStatus::Done), "untried tail");
+        assert!(map.covers(200, 300, RegionStatus::Bad));
+        assert!(map.covers(100, 100, RegionStatus::Bad), "empty range");
+        assert!(
+            !map.covers(900, 1100, RegionStatus::Untried),
+            "past the end"
+        );
     }
 
     #[test]
