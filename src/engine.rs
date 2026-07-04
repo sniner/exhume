@@ -748,8 +748,21 @@ fn ensure_len(file: &File, len: u64) -> Result<()> {
     Ok(())
 }
 
-/// Append `.state` to the target path to form the default state-file path.
+/// Derive the default state-file path: `<target>.state` next to a regular
+/// file. For a device target, `<basename>.state` in the current directory
+/// instead — `/dev` is devtmpfs, where a state file would vanish on reboot,
+/// which is exactly when an interrupted restore needs it.
 fn default_state_path(target: &Path) -> PathBuf {
+    let is_device = std::fs::metadata(target).is_ok_and(|m| {
+        m.file_type().is_block_device() || m.file_type().is_char_device()
+    });
+    if is_device {
+        if let Some(name) = target.file_name() {
+            let mut s = name.to_owned();
+            s.push(".state");
+            return PathBuf::from(s);
+        }
+    }
     let mut s = target.as_os_str().to_owned();
     s.push(".state");
     PathBuf::from(s)
@@ -979,6 +992,21 @@ mod tests {
         assert_eq!(
             default_state_path(Path::new("grave.img")),
             PathBuf::from("grave.img.state")
+        );
+        // A missing target (fresh image) behaves like a file path.
+        assert_eq!(
+            default_state_path(Path::new("/nonexistent/dir/new.img")),
+            PathBuf::from("/nonexistent/dir/new.img.state")
+        );
+    }
+
+    #[test]
+    fn default_state_path_for_a_device_lands_in_the_cwd() {
+        // /dev/null is a character device on every Linux system; the state
+        // must not be derived onto devtmpfs, where it dies with the next boot.
+        assert_eq!(
+            default_state_path(Path::new("/dev/null")),
+            PathBuf::from("null.state")
         );
     }
 

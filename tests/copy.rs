@@ -538,6 +538,28 @@ fn defaults_target_to_grave_img() {
 }
 
 #[test]
+fn device_target_gets_its_auto_state_in_the_cwd() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    fs::write(&src, pattern(8192)).unwrap();
+
+    // Regression: the auto-named state used to be derived as /dev/null.state,
+    // which is not writable (and devtmpfs would not survive a reboot anyway).
+    // With the state in the CWD this runs through — and cleans up after itself.
+    exhume()
+        .current_dir(dir.path())
+        .arg(&src)
+        .arg("/dev/null")
+        .arg("--force")
+        .assert()
+        .success();
+    assert!(
+        !dir.path().join("null.state").exists(),
+        "the auto-named state file is removed after a clean copy"
+    );
+}
+
+#[test]
 fn json_flag_emits_a_machine_readable_summary() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

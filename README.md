@@ -38,7 +38,7 @@ exhume [OPTIONS] <SOURCE> [TARGET] [STATE]
 | -------- | ---------------------------------------------------------- | ------------------ |
 | `SOURCE` | Block device or file to read from                          | (required)         |
 | `TARGET` | Block device or file to write to                           | `grave.img`        |
-| `STATE`  | TOML state file recording parameters and progress          | `<TARGET>.state`   |
+| `STATE`  | TOML state file recording parameters and progress          | `<TARGET>.state` (for a device target: `<basename>.state` in the current directory) |
 
 Options:
 
@@ -152,10 +152,13 @@ status = "done"
 
 `status` is one of `untried`, `done`, or `bad`.
 
-If you don't pass a `STATE` argument, exhume derives `<TARGET>.state` and
-**removes it automatically when the copy finishes with no errors** — a clean run
-leaves no clutter behind (handy too when the target is a block device, where the
-derived path would otherwise be e.g. `/dev/sdb.state`). A state file you name
+If you don't pass a `STATE` argument, exhume derives `<TARGET>.state` — except
+for a device target, where the state goes to `<basename>.state` in the current
+directory instead (e.g. `./sdb.state` when restoring to `/dev/sdb`): `/dev` is
+devtmpfs, so a state file there would not survive the reboot that likely
+interrupted the restore in the first place. The auto-named file is **removed
+automatically when the copy finishes with no errors** — a clean run leaves no
+clutter behind. A state file you name
 explicitly is always kept, and an auto-named one is also kept if the run is
 interrupted or any blocks were unreadable, so you can resume or inspect it. Note
 that once a clean auto-run has removed its state, re-running the same command

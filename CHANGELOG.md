@@ -4,6 +4,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Changed
+
+- **Device targets keep their auto-named state file in the current directory** (`./sdb.state`
+  for `/dev/sdb`) instead of deriving `/dev/sdb.state` on devtmpfs, which is often not writable
+  and never survives a reboot — exactly when an interrupted restore needs the state to resume.
+  An explicitly named state file is unaffected
+
 ### Fixed
 
 - **Read errors are classified** — only genuine media errors (`EIO`, `EREMOTEIO`, `EBADMSG`)
