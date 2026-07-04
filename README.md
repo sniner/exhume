@@ -161,6 +161,13 @@ Verification needs only the target and the state file; the source is never
 read. A mismatch names the chunk offsets, so you know *where* an archived
 image went bad, not just *that* it did.
 
+Verify is **resumable**: progress is checkpointed to the state file's
+`[verify]` section, so an interrupted pass over a many-TB image continues at
+its cursor when you re-run with `--verify`. A completed pass records its
+result and timestamp — `exhume --status run.state` shows it as a "last
+verified" line. Any write to the target (a resumed copy, a retry recovery)
+drops the recorded result, since it no longer describes the target.
+
 ## Resuming
 
 Progress is checkpointed to the state file periodically and on `Ctrl-C`. To

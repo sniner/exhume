@@ -18,10 +18,11 @@ use crate::hash::{ChunkHasher, Digester, chunk_count};
 use crate::params::{DEFAULT_SECTOR_SIZE, DEFAULT_TARGET, RunParams, require_sector_aligned};
 use crate::progress::Reporter;
 use crate::region::{RegionMap, RegionStatus};
-use crate::state::{Hashes, StateFile};
+use crate::state::{Hashes, StateFile, VerifyState};
 
-/// How often to flush the state file to disk during a long copy.
-const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+/// How often to flush the state file to disk during a long copy (and how
+/// often the verify pass checkpoints its cursor).
+pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Set by the SIGINT/SIGTERM handler so the copy loop can stop and flush.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -58,28 +59,7 @@ pub struct Summary {
     pub verify: Option<VerifyOutcome>,
 }
 
-/// Outcome of a `--verify` pass: the target read back against the manifest.
-#[derive(Debug, Clone)]
-pub struct VerifyOutcome {
-    /// Chunks checked against a recorded digest.
-    pub chunks_checked: u64,
-    /// Bytes read back and verified.
-    pub bytes_verified: u64,
-    /// Chunks in the grid without a digest (bad regions, incomplete manifest).
-    pub chunks_unhashed: u64,
-    /// Domain offsets of chunks whose content no longer matches the manifest.
-    pub mismatches: Vec<u64>,
-    /// The pass was interrupted before checking everything.
-    pub interrupted: bool,
-}
-
-impl VerifyOutcome {
-    /// Whether everything checked matched (an interrupted pass is not ok).
-    #[must_use]
-    pub fn ok(&self) -> bool {
-        self.mismatches.is_empty() && !self.interrupted
-    }
-}
+pub use crate::verify::VerifyOutcome;
 
 /// Run a copy as described by the command line, resuming from a state file if
 /// one exists.
@@ -191,6 +171,8 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     // For the summary: how much *this* run contributes (0 = no-op resume).
     let done_at_start = map.bytes_with(RegionStatus::Done);
 
+    let prior_verify = existing.as_ref().and_then(|s| s.verify.clone());
+
     let mut copier = Copier::new(
         read_src,
         &dst,
@@ -204,6 +186,7 @@ pub fn run(cli: &Cli) -> Result<Summary> {
         transfer,
         direct,
         hasher,
+        prior_verify,
     );
     let interrupted = match copier.drive(cli.retry) {
         Ok(interrupted) => interrupted,
@@ -223,14 +206,15 @@ pub fn run(cli: &Cli) -> Result<Summary> {
 
     // Persist the final state regardless of how the loop ended.
     copier.flush()?;
-    let (map, bytes_written, hasher) = copier.into_parts();
+    let (map, bytes_written, hasher, verify_carry) = copier.into_parts();
     reporter.finish();
 
     // Materialise a sparse tail: ensure a regular-file target spans the whole
     // processed domain even if trailing blocks were skipped (zero or unchanged).
     ensure_len(&dst, params.seek + map.covered_end())?;
 
-    // Read the target back against the manifest.
+    // Read the target back against the manifest, resuming an interrupted pass
+    // from its cursor.
     let verify = if cli.verify && !interrupted {
         let Some(hasher) = &hasher else {
             return Err(Error::Refused(
@@ -239,15 +223,20 @@ pub fn run(cli: &Cli) -> Result<Summary> {
                     .to_string(),
             ));
         };
-        Some(verify_target(
-            &dst,
-            params.seek,
+        let ctx = crate::verify::VerifyCtx {
+            dst: &dst,
+            seek: params.seek,
             domain,
             transfer,
-            hasher,
-            cli.quiet,
-            cli.json_progress,
-        )?)
+            quiet: cli.quiet,
+            json_progress: cli.json_progress,
+            params: &params,
+            map: &map,
+            created,
+            bytes_written,
+            state_path: &state_path,
+        };
+        Some(crate::verify::run(&ctx, hasher, verify_carry)?)
     } else {
         if cli.verify {
             warn!("skipping --verify: the copy was interrupted — resume first");
@@ -274,110 +263,6 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     );
     discard_auto_state(cli.state.is_some(), &summary);
     Ok(summary)
-}
-
-/// Read the target back chunk by chunk and compare each digest against the
-/// manifest. Chunks without a digest are counted but cannot be checked. A
-/// short read (truncated target) counts as a mismatch.
-fn verify_target(
-    dst: &File,
-    seek: u64,
-    domain: u64,
-    transfer: u64,
-    hasher: &ChunkHasher,
-    quiet: bool,
-    json_progress: bool,
-) -> Result<VerifyOutcome> {
-    let chunk_size = hasher.chunk_size();
-    let grid = if domain > 0 {
-        chunk_count(domain, chunk_size)
-    } else {
-        hasher.chunks().len() as u64
-    };
-
-    let bytes_total: u64 = (0..grid)
-        .filter(|&i| hasher.get(i).is_some())
-        .map(|i| chunk_len(i, chunk_size, domain))
-        .sum();
-    let reporter = Reporter::new(bytes_total, 0, quiet, json_progress.then_some("verify"));
-
-    let mut outcome = VerifyOutcome {
-        chunks_checked: 0,
-        bytes_verified: 0,
-        chunks_unhashed: 0,
-        mismatches: Vec::new(),
-        interrupted: false,
-    };
-    let mut buf = vec![0u8; usize::try_from(transfer).expect("transfer fits in usize")];
-
-    for index in 0..grid {
-        if interrupted() {
-            outcome.interrupted = true;
-            break;
-        }
-        let Some(expected) = hasher.get(index) else {
-            outcome.chunks_unhashed += 1;
-            continue;
-        };
-        let start = index * chunk_size;
-        let len = chunk_len(index, chunk_size, domain);
-        match digest_target_range(dst, seek + start, len, &mut buf, &reporter)? {
-            Some(digest) if digest == expected => {}
-            _ => {
-                warn!(
-                    offset = start,
-                    "verify mismatch — chunk differs from the manifest"
-                );
-                outcome.mismatches.push(start);
-            }
-        }
-        outcome.chunks_checked += 1;
-        outcome.bytes_verified += len;
-    }
-    reporter.finish();
-    Ok(outcome)
-}
-
-/// The expected length of chunk `index`: `chunk_size`, clipped by the domain
-/// tail (an unknown domain expects full chunks; its tail sorts itself out via
-/// the short-read path).
-fn chunk_len(index: u64, chunk_size: u64, domain: u64) -> u64 {
-    let start = index * chunk_size;
-    if domain > 0 {
-        chunk_size.min(domain - start)
-    } else {
-        chunk_size
-    }
-}
-
-/// Digest `len` bytes of the target at `offset`, in `buf`-sized reads. `None`
-/// on a short read (truncated target).
-fn digest_target_range(
-    dst: &File,
-    offset: u64,
-    len: u64,
-    buf: &mut [u8],
-    reporter: &Reporter,
-) -> Result<Option<String>> {
-    let mut digester = Digester::new();
-    let mut pos = 0u64;
-    while pos < len {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "bounded by the buffer length, which fits in usize"
-        )]
-        let want = (buf.len() as u64).min(len - pos) as usize;
-        let n = dst
-            .read_at(&mut buf[..want], offset + pos)
-            .map_err(|e| Error::io(format!("reading target back at offset {}", offset + pos), e))?;
-        if n == 0 {
-            return Ok(None);
-        }
-        digester.update(&buf[..n]);
-        reporter.inc(n as u64);
-        pos += n as u64;
-    }
-    Ok(Some(digester.finish()))
 }
 
 /// Decide whether this run hashes, and build the chunk hasher. Hashing is on
@@ -650,6 +535,12 @@ struct Copier<'a> {
     cmp_buf: Vec<u8>,
     /// Manifest hasher fed from the source reads; `None` when hashing is off.
     hasher: Option<ChunkHasher>,
+    /// The `[verify]` section loaded from the resumed state, carried through
+    /// as long as the target is untouched.
+    prior_verify: Option<VerifyState>,
+    /// Set on the first actual target write: a verify result describes a
+    /// snapshot of the target, so any write invalidates `prior_verify`.
+    wrote_this_run: bool,
     last_flush: Instant,
 }
 
@@ -672,6 +563,7 @@ impl<'a> Copier<'a> {
         transfer: u64,
         direct: bool,
         hasher: Option<ChunkHasher>,
+        prior_verify: Option<VerifyState>,
     ) -> Self {
         let buf_size = transfer as usize;
         let cmp_buf = if params.skip_unchanged {
@@ -695,6 +587,8 @@ impl<'a> Copier<'a> {
             buf: AlignedBuf::new(buf_size, params.sector_size as usize),
             cmp_buf,
             hasher,
+            prior_verify,
+            wrote_this_run: false,
             last_flush: Instant::now(),
         }
     }
@@ -946,6 +840,7 @@ impl<'a> Copier<'a> {
                     Error::io(format!("writing {n} bytes at target offset {dst_off}"), e)
                 })?;
             self.bytes_written += n as u64;
+            self.wrote_this_run = true;
         }
         Ok(())
     }
@@ -1005,13 +900,14 @@ impl<'a> Copier<'a> {
         Ok(Some(digester.finish()))
     }
 
-    /// The current manifest for persisting, if hashing is on.
-    fn manifest(&self) -> Option<Hashes> {
-        self.hasher.as_ref().map(|hasher| Hashes {
-            algorithm: crate::hash::ALGORITHM.to_string(),
-            chunk_size: hasher.chunk_size(),
-            chunks: hasher.chunks().to_vec(),
-        })
+    /// The `[verify]` section this run may keep: the loaded one as long as
+    /// nothing was written to the target, nothing afterwards.
+    fn verify_carry(&self) -> Option<VerifyState> {
+        if self.wrote_this_run {
+            None
+        } else {
+            self.prior_verify.clone()
+        }
     }
 
     /// Serialise and atomically write the current state, and reset the flush timer.
@@ -1022,17 +918,29 @@ impl<'a> Copier<'a> {
             self.domain,
             self.created,
             self.bytes_written,
-            self.manifest(),
+            self.hasher.as_ref().map(manifest_of),
+            self.verify_carry(),
         )
         .save_atomic(self.state_path)?;
         self.last_flush = Instant::now();
         Ok(())
     }
 
-    /// Consume the copier, returning the region map, the write counter, and
-    /// the manifest hasher (for the verify pass).
-    fn into_parts(self) -> (RegionMap, u64, Option<ChunkHasher>) {
-        (self.map, self.bytes_written, self.hasher)
+    /// Consume the copier, returning the region map, the write counter, the
+    /// manifest hasher, and the surviving `[verify]` section (for the verify
+    /// pass to resume from).
+    fn into_parts(self) -> (RegionMap, u64, Option<ChunkHasher>, Option<VerifyState>) {
+        let verify_carry = self.verify_carry();
+        (self.map, self.bytes_written, self.hasher, verify_carry)
+    }
+}
+
+/// The persistable `[hashes]` section for a manifest hasher.
+pub(crate) fn manifest_of(hasher: &ChunkHasher) -> Hashes {
+    Hashes {
+        algorithm: crate::hash::ALGORITHM.to_string(),
+        chunk_size: hasher.chunk_size(),
+        chunks: hasher.chunks().to_vec(),
     }
 }
 
@@ -1271,7 +1179,7 @@ fn target_occupied(path: &Path) -> Result<bool> {
     }
 }
 
-fn interrupted() -> bool {
+pub(crate) fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed)
 }
 

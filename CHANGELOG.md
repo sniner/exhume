@@ -2,6 +2,16 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Changed
+
+- **`--verify` is resumable and records its result** — verify progress is checkpointed to a new
+  `[verify]` section in the state file (cursor + mismatches), so an interrupted pass continues
+  where it stopped on the next `--verify`. A completed pass keeps its result and timestamp in
+  the state (`--status` shows it as a "Verify:" line); any write to the target drops the
+  recorded result, since it no longer describes the target
+
 ## [0.3.0] - 2026-07-04
 
 ### Added

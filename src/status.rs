@@ -16,7 +16,7 @@ use crate::error::Result;
 use crate::hash::chunk_count;
 use crate::params::DEFAULT_TARGET;
 use crate::region::RegionStatus;
-use crate::state::StateFile;
+use crate::state::{StateFile, VerifyState};
 
 /// How many bad regions the human rendering lists before summarising.
 const BAD_REGION_LIMIT: usize = 20;
@@ -45,6 +45,9 @@ pub struct StatusReport {
     /// Manifest coverage, when the state carries hashes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hashes: Option<HashStatus>,
+    /// Verify progress or result, when the state carries a `[verify]` section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,6 +114,7 @@ pub fn report(cli: &Cli) -> Result<StatusReport> {
         bad_bytes: map.bytes_with(RegionStatus::Bad),
         bad_regions,
         hashes,
+        verify: state.verify.clone(),
     })
 }
 
@@ -193,6 +197,9 @@ pub fn render(r: &StatusReport) -> String {
             h.chunks_total,
         );
     }
+    if let Some(v) = &r.verify {
+        let _ = writeln!(out, "Verify:   {}", verify_phrase(v, r.hashes.as_ref()));
+    }
     if !r.bad_regions.is_empty() {
         let _ = writeln!(out, "Bad regions ({}):", r.bad_regions.len());
         for region in r.bad_regions.iter().take(BAD_REGION_LIMIT) {
@@ -212,6 +219,32 @@ pub fn render(r: &StatusReport) -> String {
         }
     }
     out
+}
+
+/// One-line summary of a `[verify]` section: in progress (with cursor),
+/// finished ok, or finished with mismatches.
+fn verify_phrase(v: &VerifyState, hashes: Option<&HashStatus>) -> String {
+    if let Some(cursor) = v.cursor {
+        let of = hashes.map_or(String::new(), |h| format!(" of {}", h.chunks_total));
+        let found = if v.mismatches.is_empty() {
+            String::new()
+        } else {
+            format!(", {} mismatch(es) so far", v.mismatches.len())
+        };
+        return format!("in progress - next chunk {cursor}{of}{found}; continue with --verify");
+    }
+    let finished = v.finished.map_or(String::new(), |t| {
+        format!(" ({})", t.format("%Y-%m-%d %H:%M UTC"))
+    });
+    if v.mismatches.is_empty() {
+        format!("ok{finished}")
+    } else {
+        format!(
+            "FAILED - {} mismatch(es), first at offset {}{finished}",
+            v.mismatches.len(),
+            v.mismatches[0]
+        )
+    }
 }
 
 /// `, skip 1.00 MiB` when nonzero, empty otherwise.

@@ -8,6 +8,7 @@
 //! [params]          # the full run configuration (see RunParams)
 //! [progress]        # human-facing totals (derivable from regions)
 //! [hashes]          # optional integrity manifest: per-chunk digests
+//! [verify]          # optional verify progress/result (cursor or outcome)
 //! [[regions]]       # the region map: start / length / status
 //! ```
 
@@ -63,6 +64,27 @@ pub struct Hashes {
     pub chunks: Vec<String>,
 }
 
+/// Progress and result of a verify pass (`[verify]`). A pass in progress has
+/// `cursor` set (the next chunk index to check); a completed pass has
+/// `finished` and `ok`. The section describes a *snapshot* of the target —
+/// any write to the target invalidates it, and exhume drops it then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyState {
+    /// Next chunk index to check; absent once the pass completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<u64>,
+    /// Domain offsets of mismatching chunks found by this pass so far.
+    #[serde(default)]
+    pub mismatches: Vec<u64>,
+    pub started: DateTime<Utc>,
+    /// Set when the pass checked the whole grid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<DateTime<Utc>>,
+    /// Set with `finished`: no mismatches over the whole pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateFile {
     pub meta: Meta,
@@ -72,6 +94,9 @@ pub struct StateFile {
     /// Optional integrity manifest (`[hashes]`), present when hashing was on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hashes: Option<Hashes>,
+    /// Optional verify progress/result (`[verify]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyState>,
     #[serde(default)]
     pub regions: Vec<Region>,
 }
@@ -92,6 +117,7 @@ impl StateFile {
         created: DateTime<Utc>,
         bytes_written: u64,
         hashes: Option<Hashes>,
+        verify: Option<VerifyState>,
     ) -> Self {
         StateFile {
             meta: Meta {
@@ -103,6 +129,7 @@ impl StateFile {
             },
             params: params.clone(),
             hashes,
+            verify,
             progress: Progress {
                 bytes_total: domain,
                 bytes_done: map.bytes_with(RegionStatus::Done),
@@ -224,7 +251,7 @@ mod tests {
         let mut map = RegionMap::from_total(4096);
         map.mark(0, 2048, RegionStatus::Done);
         map.mark(2048, 1024, RegionStatus::Bad);
-        let state = StateFile::build(&sample_params(), &map, 4096, Utc::now(), 2048, None);
+        let state = StateFile::build(&sample_params(), &map, 4096, Utc::now(), 2048, None, None);
 
         let text = toml::to_string_pretty(&state).unwrap();
         assert!(text.contains("[meta]"));
@@ -259,6 +286,7 @@ mod tests {
             Utc::now(),
             4096,
             Some(hashes.clone()),
+            None,
         );
 
         let text = toml::to_string_pretty(&state).unwrap();
@@ -266,5 +294,55 @@ mod tests {
 
         let parsed: StateFile = toml::from_str(&text).unwrap();
         assert_eq!(parsed.hashes, Some(hashes));
+    }
+
+    #[test]
+    fn verify_state_round_trips_in_both_shapes() {
+        use super::VerifyState;
+
+        let mut map = RegionMap::from_total(4096);
+        map.mark(0, 4096, RegionStatus::Done);
+
+        // In progress: cursor set, no result yet.
+        let in_progress = VerifyState {
+            cursor: Some(7),
+            mismatches: vec![4096],
+            started: Utc::now(),
+            finished: None,
+            ok: None,
+        };
+        let state = StateFile::build(
+            &sample_params(),
+            &map,
+            4096,
+            Utc::now(),
+            4096,
+            None,
+            Some(in_progress.clone()),
+        );
+        let text = toml::to_string_pretty(&state).unwrap();
+        assert!(text.contains("[verify]"), "state was:\n{text}");
+        let parsed: StateFile = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.verify, Some(in_progress));
+
+        // Finished: no cursor, result recorded.
+        let finished = VerifyState {
+            cursor: None,
+            mismatches: Vec::new(),
+            started: Utc::now(),
+            finished: Some(Utc::now()),
+            ok: Some(true),
+        };
+        let state = StateFile::build(
+            &sample_params(),
+            &map,
+            4096,
+            Utc::now(),
+            4096,
+            None,
+            Some(finished.clone()),
+        );
+        let parsed: StateFile = toml::from_str(&toml::to_string_pretty(&state).unwrap()).unwrap();
+        assert_eq!(parsed.verify, Some(finished));
     }
 }

@@ -761,6 +761,140 @@ fn verify_detects_target_corruption() {
 }
 
 #[test]
+fn verify_records_its_result_in_the_state() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(16 * 1024)).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .arg("--verify")
+        .assert()
+        .success();
+
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(s.contains("[verify]"), "state was:\n{s}");
+    assert!(s.contains("ok = true"), "state was:\n{s}");
+    assert!(
+        !s.contains("cursor"),
+        "completed pass keeps no cursor:\n{s}"
+    );
+
+    // --status shows the recorded result.
+    exhume()
+        .arg("--status")
+        .arg(&state)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verify:   ok"));
+}
+
+#[test]
+fn verify_resumes_from_a_saved_cursor() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    fs::write(&src, pattern(16 * 1024)).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .assert()
+        .success();
+
+    // Corrupt chunk 0 — *behind* the seeded cursor — and chunk 3, ahead of it.
+    let mut clone = fs::read(&dst).unwrap();
+    clone[100] ^= 0xFF;
+    clone[13000] ^= 0xFF;
+    fs::write(&dst, &clone).unwrap();
+
+    // Seed an interrupted pass that already checked chunks 0 and 1.
+    let mut s = fs::read_to_string(&state).unwrap();
+    s.push_str("\n[verify]\ncursor = 2\nmismatches = []\nstarted = \"2026-07-04T10:00:00Z\"\n");
+    fs::write(&state, &s).unwrap();
+
+    // The resumed pass checks chunks 2..4 only: it finds the mismatch at
+    // 12288 (chunk 3) but NOT the one at 0 — cursor semantics.
+    let output = exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--verify")
+        .arg("--json")
+        .arg("--quiet")
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(report["verify"]["chunks_checked"], 2, "resumed at chunk 2");
+    assert_eq!(report["verify"]["mismatches"], serde_json::json!([12288]));
+
+    // A fresh pass (no cursor left) starts over and finds both.
+    let output = exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--verify")
+        .arg("--json")
+        .arg("--quiet")
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(report["verify"]["chunks_checked"], 4);
+    assert_eq!(
+        report["verify"]["mismatches"],
+        serde_json::json!([0, 12288])
+    );
+}
+
+#[test]
+fn a_write_invalidates_the_recorded_verify() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    let data = pattern(16 * 1024);
+    fs::write(&src, &data[..8192]).unwrap();
+
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--hash-chunk")
+        .arg("4K")
+        .arg("--verify")
+        .assert()
+        .success();
+    assert!(fs::read_to_string(&state).unwrap().contains("[verify]"));
+
+    // The source grows; the resume copies the new tail — a target write, so
+    // the recorded verify result no longer describes the target.
+    fs::write(&src, &data).unwrap();
+    exhume().arg(&src).arg(&dst).arg(&state).assert().success();
+
+    let s = fs::read_to_string(&state).unwrap();
+    assert!(
+        !s.contains("[verify]"),
+        "a write must drop the stale verify result; state was:\n{s}"
+    );
+}
+
+#[test]
 fn verify_without_a_manifest_is_refused() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");
