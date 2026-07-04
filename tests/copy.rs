@@ -573,6 +573,90 @@ fn defaults_target_to_grave_img() {
 }
 
 #[test]
+fn export_map_writes_a_ddrescue_mapfile() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src.img");
+    let dst = dir.path().join("out.img");
+    let state = dir.path().join("run.state");
+    let mapfile = dir.path().join("rescue.map");
+    let data = pattern(16 * 1024);
+    fs::write(&src, &data).unwrap();
+    let mut clone = data.clone();
+    clone[8192..12288].fill(0);
+    fs::write(&dst, &clone).unwrap();
+
+    // Same seeding as the retry test: one bad region at [8K,12K).
+    let seeded = format!(
+        r#"[meta]
+version = 1
+program = "exhume"
+program_version = "0.0.0"
+created = "2026-06-18T08:00:00Z"
+updated = "2026-06-18T08:00:00Z"
+
+[params]
+source = "{src}"
+target = "{dst}"
+sector_size = 512
+transfer_size = 4096
+skip = 0
+seek = 0
+length = 0
+skip_unchanged = false
+skip_zeros = false
+
+[progress]
+bytes_total = 16384
+bytes_done = 12288
+bytes_written = 12288
+errors = 1
+
+[[regions]]
+start = 0
+length = 8192
+status = "done"
+
+[[regions]]
+start = 8192
+length = 4096
+status = "bad"
+
+[[regions]]
+start = 12288
+length = 4096
+status = "done"
+"#,
+        src = src.display(),
+        dst = dst.display()
+    );
+    fs::write(&state, &seeded).unwrap();
+
+    // Without --retry the bad region stays; the run exits 2 and the exported
+    // mapfile shows it as a ddrescue bad-sector extent.
+    exhume()
+        .arg(&src)
+        .arg(&dst)
+        .arg(&state)
+        .arg("--export-map")
+        .arg(&mapfile)
+        .assert()
+        .code(2);
+
+    let text = fs::read_to_string(&mapfile).unwrap();
+    let extents: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(
+        extents,
+        vec![
+            "0x00002000     ?               1", // current_pos = the bad region
+            "0x00000000  0x00002000  +",
+            "0x00002000  0x00001000  -",
+            "0x00003000  0x00001000  +",
+        ],
+        "mapfile was:\n{text}"
+    );
+}
+
+#[test]
 fn device_target_gets_its_auto_state_in_the_cwd() {
     let dir = tempdir().unwrap();
     let src = dir.path().join("src.img");

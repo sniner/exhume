@@ -26,7 +26,9 @@ simply re-running the same command.
 surviving the *occasional* read error, primarily on flash/SSD. For a dying hard
 disk, hours of scraping, or heavy damage, reach for **GNU ddrescue**: it is built
 for the storm. exhume deliberately stops short of that rather than read a failing
-medium to death.
+medium to death — and hands over cleanly: `--export-map` writes the region map
+as a ddrescue mapfile, so ddrescue picks up exactly where exhume left off,
+skipping everything already copied.
 
 ## Usage
 
@@ -73,6 +75,13 @@ Options:
 - `--retry` — re-read regions marked `bad` in a previous run (resume) and
   recover what is now readable, at sector granularity. One pass per invocation;
   re-run for more.
+- `--export-map <PATH>` — after the run, also write the region map as a GNU
+  ddrescue mapfile (`+` done, `-` bad, `?` untried), for escalating an
+  unfinished rescue: `ddrescue <source> <target> <PATH>` continues where exhume
+  stopped. Positions are absolute source offsets (`--skip` included); with a
+  nonzero `--seek` you need matching offset options on the ddrescue side. To
+  export from an existing state without copying anything new, just re-run the
+  same (already completed or bad-region-only) command with `--export-map`.
 - `--direct` — read the source with `O_DIRECT`, bypassing the page cache so a
   re-read (e.g. under `--retry`) actually hits the medium instead of returning
   cached bytes. Reads only — the target is written normally. Linux only;
@@ -173,7 +182,8 @@ file, resume, sector-aware read-error handling (a failed transfer block is
 isolated down to the dead sectors), the `--skip-unchanged` / `--skip-zeros`
 write-reduction modes, a `--retry` pass for `bad` regions, a `--direct`
 (`O_DIRECT`) mode so retries bypass the page cache, a `--json` summary for
-scripting, and the preflight safety checks described above.
+scripting, the preflight safety checks described above, and a `--export-map`
+handover to GNU ddrescue.
 
 ## License
 

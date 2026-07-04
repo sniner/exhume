@@ -73,6 +73,11 @@ pub struct Cli {
     #[arg(long)]
     pub retry: bool,
 
+    /// After the run, also write the region map as a GNU ddrescue mapfile, to
+    /// hand an unfinished rescue over to ddrescue where exhume left off
+    #[arg(long, value_name = "PATH")]
+    pub export_map: Option<PathBuf>,
+
     /// Read the source with O_DIRECT, bypassing the page cache so a re-read
     /// actually hits the medium (Linux only; for failing devices)
     #[allow(

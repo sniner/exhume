@@ -6,6 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com).
 
 ### Added
 
+- **`--export-map <PATH>`** — writes the final region map as a GNU ddrescue mapfile (`+` done,
+  `-` bad, `?` untried; positions are absolute source offsets), so an unfinished rescue can be
+  handed over to ddrescue exactly where exhume left off, skipping everything already copied
 - **`--skip-unchanged` / `--skip-zeros` take an optional value** — the modes are sticky across
   resumes, and `--skip-unchanged=false` / `--skip-zeros=false` now switch them off again
   without editing the state file

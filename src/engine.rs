@@ -180,6 +180,12 @@ pub fn run(cli: &Cli) -> Result<Summary> {
     // processed domain even if trailing blocks were skipped (zero or unchanged).
     ensure_len(&dst, params.seek + map.covered_end())?;
 
+    // Handover to the heavy machinery: the final map as a ddrescue mapfile.
+    if let Some(map_path) = &cli.export_map {
+        crate::mapfile::export(&map, params.skip, map_path)?;
+        info!(mapfile = %map_path.display(), "wrote ddrescue mapfile");
+    }
+
     let summary = summarize(
         params,
         target,
