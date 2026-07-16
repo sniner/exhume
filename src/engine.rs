@@ -385,10 +385,11 @@ fn setup_hashing(
     Ok(Some(ChunkHasher::new(chunk_size, domain, chunks)))
 }
 
-/// Set up the `O_DIRECT` read side (reads only): a separate fd opened with
-/// `O_DIRECT`, used for the copy so re-reads bypass the page cache and hit the
-/// medium. `None` (with a warning) where it does not apply — a non-seekable
-/// source, or off Linux.
+/// Set up the cache-bypassing read side (reads only): a separate fd opened for
+/// direct reads (`O_DIRECT` on Linux, `F_NOCACHE` on macOS), used for the copy
+/// so re-reads bypass the page cache and hit the medium. `None` (with a
+/// warning) where it does not apply — a non-seekable source, or a platform
+/// without cache bypass.
 fn setup_direct(cli: &Cli, params: &RunParams, domain: u64) -> Result<Option<File>> {
     if !cli.direct {
         return Ok(None);
@@ -398,7 +399,7 @@ fn setup_direct(cli: &Cli, params: &RunParams, domain: u64) -> Result<Option<Fil
         return Ok(None);
     }
     if !supports_direct() {
-        warn!("--direct ignored: O_DIRECT is only available on Linux");
+        warn!("--direct ignored: page-cache bypass is not supported on this platform");
         return Ok(None);
     }
     // O_DIRECT wants offsets, lengths, and the buffer aligned to the device's

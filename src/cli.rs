@@ -90,8 +90,8 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub export_map: Option<PathBuf>,
 
-    /// Read the source with O_DIRECT, bypassing the page cache so a re-read
-    /// actually hits the medium (Linux only; for failing devices)
+    /// Read the source bypassing the page cache so a re-read actually hits
+    /// the medium (O_DIRECT on Linux, F_NOCACHE on macOS; for failing devices)
     #[allow(
         clippy::doc_markdown,
         reason = "this doc comment is clap --help text; backticks would render literally"

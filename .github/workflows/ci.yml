@@ -11,8 +11,14 @@ env:
 
 jobs:
   lint:
-    name: Format & clippy
-    runs-on: ubuntu-latest
+    # Matrixed because the platform backends (src/platform/{linux,macos}.rs)
+    # are cfg-gated: clippy only sees the backend of the OS it runs on.
+    name: Format & clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -30,10 +36,13 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
   test:
-    name: Test
-    # exhume is a Linux tool (BLKSSZGET, O_DIRECT, POSIX_FADV_RANDOM), so CI is
-    # Linux-only. The root-only dm-readerror.sh is not run here.
-    runs-on: ubuntu-latest
+    # The root-only dm-readerror.sh is not run here.
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
 

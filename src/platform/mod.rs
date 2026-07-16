@@ -12,9 +12,14 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as imp;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod fallback;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use fallback as imp;
 
 pub use imp::{

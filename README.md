@@ -88,11 +88,11 @@ Options:
   nonzero `--seek` you need matching offset options on the ddrescue side. To
   export from an existing state without copying anything new, just re-run the
   same (already completed or bad-region-only) command with `--export-map`.
-- `--direct` — read the source with `O_DIRECT`, bypassing the page cache so a
-  re-read (e.g. under `--retry`) actually hits the medium instead of returning
-  cached bytes. Reads only — the target is written normally. Linux only;
-  primarily for failing devices. If the source's filesystem rejects `O_DIRECT`,
-  exhume says so and you can retry without it.
+- `--direct` — read the source bypassing the page cache (`O_DIRECT` on Linux,
+  `F_NOCACHE` on macOS), so a re-read (e.g. under `--retry`) actually hits the
+  medium instead of returning cached bytes. Reads only — the target is written
+  normally. Primarily for failing devices. If the source's filesystem rejects
+  `O_DIRECT`, exhume says so and you can retry without it.
 - `--status` — show the state (progress, bad regions, manifest coverage)
   without copying anything. Works with the usual arguments (`exhume /dev/sdb
   backup.img --status`) or pointed straight at a state file (`exhume --status
@@ -236,9 +236,16 @@ file, resume, sector-aware read-error handling (a failed transfer block is
 isolated down to the dead sectors), an always-on integrity manifest with
 `--refresh` (manifest-based image refreshing) and resumable `--verify`
 closing the rot-repair loop, a `--retry` pass for `bad` regions, a `--direct`
-(`O_DIRECT`) mode so retries bypass the page cache, `--json` /
-`--json-progress` for scripting, the preflight safety checks described above,
-and a `--export-map` handover to GNU ddrescue.
+mode so retries bypass the page cache, `--json` / `--json-progress` for
+scripting, the preflight safety checks described above, and a `--export-map`
+handover to GNU ddrescue.
+
+exhume runs on Linux and macOS (on macOS, image the raw `/dev/rdiskN` node —
+it is far faster than the buffered `/dev/diskN`). The macOS mounted-device
+guard does not yet trace APFS-synthesized containers to their physical store,
+so `diskutil unmountDisk` before imaging remains a good habit. Other Unixes
+compile with safely degraded behavior (default sector size, no `--direct`, no
+mounted guard).
 
 ## License
 
