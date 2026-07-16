@@ -240,7 +240,7 @@ mode so retries bypass the page cache, `--json` / `--json-progress` for
 scripting, the preflight safety checks described above, and a `--export-map`
 handover to GNU ddrescue.
 
-exhume runs on Linux and macOS (on macOS, image the raw `/dev/rdiskN` node —
+exhume runs on Linux and, experimentally, on macOS (there, image the raw `/dev/rdiskN` node —
 it is far faster than the buffered `/dev/diskN`). The macOS mounted-device
 guard does not yet trace APFS-synthesized containers to their physical store,
 so `diskutil unmountDisk` before imaging remains a good habit. Other Unixes

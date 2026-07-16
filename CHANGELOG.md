@@ -2,15 +2,17 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.6.0] - 2026-07-17
 
 ### Added
 
-- **macOS support** — exhume now runs natively on macOS: device capacity and sector size come
-  from the disk driver (`DKIOC*`), `--direct` maps to `F_NOCACHE`, read-ahead containment to
-  `F_RDAHEAD`, and the mounted-device guard covers a disk's slices via `getfsstat` (it does
-  not yet trace APFS-synthesized containers to their physical store). Image the raw
-  `/dev/rdiskN` node — it is far faster than the buffered `/dev/diskN`
+- **macOS support (experimental)** — exhume now runs natively on macOS: device capacity and
+  sector size come from the disk driver (`DKIOC*`), `--direct` maps to `F_NOCACHE`, read-ahead
+  containment to `F_RDAHEAD`, and the mounted-device guard covers a disk's slices via
+  `getfsstat` (it does not yet trace APFS-synthesized containers to their physical store).
+  Image the raw `/dev/rdiskN` node — it is far faster than the buffered `/dev/diskN`.
+  Experimental: the macOS backend is CI-tested but has seen little real-disk rescue work yet —
+  treat it with appropriate care and report surprises
 - **macOS release binary** — releases now include a universal (Apple Silicon + Intel) binary
 - **Other Unixes** (the BSDs) compile with safely degraded behavior: the default sector size
   instead of probing the device, no `--direct`, and no mounted-device guard
