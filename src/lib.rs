@@ -11,6 +11,7 @@ pub mod error;
 pub mod hash;
 pub mod mapfile;
 pub mod params;
+pub(crate) mod platform;
 pub mod progress;
 pub mod region;
 pub mod safety;

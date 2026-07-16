@@ -2,7 +2,7 @@
 //! the block-wise copy loop, and graceful interruption.
 
 use std::fs::{File, OpenOptions};
-use std::io::{ErrorKind, Seek, SeekFrom};
+use std::io::ErrorKind;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::{FileExt, FileTypeExt};
 use std::path::{Path, PathBuf};
@@ -15,7 +15,11 @@ use tracing::{info, warn};
 use crate::cli::Cli;
 use crate::error::{Error, Result};
 use crate::hash::{ChunkHasher, Digester, chunk_count};
-use crate::params::{DEFAULT_SECTOR_SIZE, DEFAULT_TARGET, RunParams, require_sector_aligned};
+use crate::params::{DEFAULT_TARGET, RunParams, require_sector_aligned};
+use crate::platform::{
+    detect_sector_size, detect_size, disable_readahead, is_media_error, open_source_direct,
+    supports_direct,
+};
 use crate::progress::Reporter;
 use crate::region::{RegionMap, RegionStatus};
 use crate::state::{Hashes, StateFile, VerifyState};
@@ -393,7 +397,7 @@ fn setup_direct(cli: &Cli, params: &RunParams, domain: u64) -> Result<Option<Fil
         warn!("--direct ignored: the source is not seekable");
         return Ok(None);
     }
-    if !cfg!(target_os = "linux") {
+    if !supports_direct() {
         warn!("--direct ignored: O_DIRECT is only available on Linux");
         return Ok(None);
     }
@@ -1265,19 +1269,6 @@ fn target_differs(dst: &File, dst_off: u64, data: &[u8], cmp_buf: &mut [u8]) -> 
     }
 }
 
-/// Whether a read error means "this spot of the medium is unreadable" — the
-/// only condition under which sectors are marked `bad` and the copy moves on.
-/// `EIO` is the block layer's damage signal, `EREMOTEIO` its USB-bridge
-/// cousin, `EBADMSG` an integrity (T10 DIF) failure. Anything else — `EINVAL`
-/// from `O_DIRECT` misuse, a vanished device, a bad fd — is not positional
-/// damage, and skipping past it would sweep the rest of the source into `bad`.
-fn is_media_error(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(nix::libc::EIO | nix::libc::EREMOTEIO | nix::libc::EBADMSG)
-    )
-}
-
 /// Whether every byte in `buf` is zero.
 fn is_all_zero(buf: &[u8]) -> bool {
     buf.iter().all(|&b| b == 0)
@@ -1314,13 +1305,6 @@ pub(crate) fn default_state_path(target: &Path) -> PathBuf {
     let mut s = target.as_os_str().to_owned();
     s.push(".state");
     PathBuf::from(s)
-}
-
-/// Detect the size of a source: regular files report their length, block
-/// devices report their capacity — both via seeking to the end. Non-seekable
-/// sources (pipes, character devices) return `None`.
-fn detect_size(file: &mut File) -> Option<u64> {
-    file.seek(SeekFrom::End(0)).ok()
 }
 
 /// Round `value` down to a multiple of `align`. `align == 0` leaves it unchanged.
@@ -1374,56 +1358,6 @@ impl DerefMut for AlignedBuf {
     }
 }
 
-/// nix-generated wrappers for the block-device ioctls we need.
-mod ioctl {
-    // BLKSSZGET — logical sector size, `_IO(0x12, 104)` == 0x1268, returns an int.
-    nix::ioctl_read_bad!(blksszget, 0x1268, nix::libc::c_int);
-}
-
-/// Detect the logical sector size of a source. Block devices report it via
-/// `BLKSSZGET`; everything else (regular files, pipes, an ioctl failure) falls
-/// back to [`DEFAULT_SECTOR_SIZE`].
-fn detect_sector_size(file: &File) -> u64 {
-    use std::os::unix::io::AsRawFd;
-    let is_block = file
-        .metadata()
-        .is_ok_and(|m| m.file_type().is_block_device());
-    if !is_block {
-        return DEFAULT_SECTOR_SIZE;
-    }
-    let mut size: nix::libc::c_int = 0;
-    // SAFETY: BLKSSZGET writes a single c_int through the pointer; the fd is
-    // valid for the duration of the call.
-    match unsafe { ioctl::blksszget(file.as_raw_fd(), &raw mut size) } {
-        Ok(_) => u64::try_from(size)
-            .ok()
-            .filter(|&s| s > 0)
-            .unwrap_or(DEFAULT_SECTOR_SIZE),
-        Err(_) => DEFAULT_SECTOR_SIZE,
-    }
-}
-
-/// Open the source with `O_DIRECT` so copy reads bypass the page cache (Linux).
-#[cfg(target_os = "linux")]
-fn open_source_direct(path: &Path) -> Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_DIRECT)
-        .open(path)
-        .map_err(|e| {
-            Error::io(
-                format!("opening source '{}' with O_DIRECT", path.display()),
-                e,
-            )
-        })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn open_source_direct(_path: &Path) -> Result<File> {
-    unreachable!("open_source_direct is only reached when O_DIRECT is available (Linux)")
-}
-
 /// Probe that `O_DIRECT` actually works on this source with one aligned sector
 /// read. A genuine I/O error (or EOF) is fine — it means the medium is just
 /// unreadable there; only `EINVAL` means the source/filesystem rejects `O_DIRECT`,
@@ -1439,23 +1373,6 @@ fn verify_direct(file: &File, sector: u64, offset: u64) -> Result<()> {
         _ => Ok(()),
     }
 }
-
-/// Hint the kernel to stop reading ahead on the source. Without this, a buffered
-/// read near a bad sector pulls a wider read-ahead window into one failing bio,
-/// ballooning a single bad byte into a much larger `bad` region; turning it off
-/// caps the loss at one page. Advisory — the result is ignored. No-op off Linux.
-#[cfg(target_os = "linux")]
-fn disable_readahead(file: &File) {
-    use std::os::unix::io::AsRawFd;
-    // SAFETY: posix_fadvise on a valid fd with constant arguments; its return is
-    // advisory and intentionally ignored (read-ahead simply stays on if it fails).
-    unsafe {
-        nix::libc::posix_fadvise(file.as_raw_fd(), 0, 0, nix::libc::POSIX_FADV_RANDOM);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn disable_readahead(_file: &File) {}
 
 /// Compute the copy domain length from the detected source size, `skip`, and
 /// `length`. `0` means "unknown / copy until end-of-input".

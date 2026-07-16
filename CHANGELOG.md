@@ -2,6 +2,14 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com).
 
+## [Unreleased]
+
+### Added
+
+- **Non-Linux builds** — exhume now compiles on macOS and the BSDs. Platform-specific
+  behavior degrades safely there for now: the default sector size instead of probing the
+  device, no `--direct`, and no mounted-device guard. Native macOS support is planned
+
 ## [0.5.0] - 2026-07-04
 
 The simplification release: fewer flags, no mode combinatorics, and the
